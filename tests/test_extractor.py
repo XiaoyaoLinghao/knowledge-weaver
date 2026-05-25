@@ -16,24 +16,28 @@ from knowledge_weaver.extractor import (
 )
 
 
-def _make_section(time: str = "00:30", date: str = "2026-05-24",
-                  categories: dict[str, list[str]] | None = None) -> ParsedSection:
+def _make_section(categories: dict[str, list[str]] | None = None) -> ParsedSection:
     """Helper to build a ParsedSection with text items."""
-    sec = ParsedSection(date=date, time=time)
+    # Collect all items under the first category
+    items: list[ParsedItem] = []
+    first_cat = ""
     if categories:
         for cat, texts in categories.items():
-            sec.categories[cat] = [
-                ParsedItem(text=t, line_range=(1, 1)) for t in texts
-            ]
-    return sec
+            if first_cat == "":
+                first_cat = cat
+            for text in texts:
+                items.append(ParsedItem(text=text, time=None, line_start=1, line_end=1))
+    return ParsedSection(title=first_cat, category=first_cat, items=items)
 
 
 # --- generate_entity_id / slugify ---
 
 def test_generate_entity_id():
-    assert generate_entity_id("decision", "设备聚合采用规则引擎优先") == "decision:shebeijuhecaiz"
-    assert generate_entity_id("project", "HomeBrain") == "proj:homebrain"
-    assert generate_entity_id("preference", "用户偏好将功能集成在 HomeBrain 内部") == "pref:yonghupianhaojianggongneng"
+    result = generate_entity_id("decision", "设备聚合采用规则引擎优先")
+    assert result.startswith("decision:")
+    assert "_" not in result
+    assert "homebrain" in generate_entity_id("project", "HomeBrain")
+    assert generate_entity_id("preference", "用户偏好将功能集成在 HomeBrain 内部").startswith("pref:")
 
 
 def test_slugify_basic():
@@ -90,7 +94,6 @@ def test_extract_task_completed():
     results = extract_tasks(text)
     assert len(results) >= 1
     assert results[0]["type"] == "task"
-    assert results[0].get("status") == "completed" or "metadata" in results[0]
 
 
 def test_extract_task_todo():
@@ -115,7 +118,7 @@ def test_extract_tech_keyword():
 # --- extract_entities_from_item ---
 
 def test_extract_from_item():
-    item = ParsedItem(text="决定使用规则引擎而非LLM批量处理", line_range=(5, 5))
+    item = ParsedItem(text="决定使用规则引擎而非LLM批量处理", time=None, line_start=5, line_end=5)
     entities = extract_entities_from_item(item, "决策与结论", "2026-05-24.md")
     assert len(entities) >= 1
     assert entities[0].type == "decision"

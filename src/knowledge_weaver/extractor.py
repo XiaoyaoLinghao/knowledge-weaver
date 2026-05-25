@@ -67,7 +67,7 @@ _TECH_KEYWORDS = [
 ]
 
 _TECH_PATTERN = re.compile(
-    r"(?:^|[^a-zA-Z])(" + "|".join(re.escape(kw) for kw in _TECH_KEYWORDS) + r")(?:[^a-zA-Z]|$)",
+    r"(?<![a-zA-Z])(" + "|".join(re.escape(kw) for kw in _TECH_KEYWORDS) + r")(?![a-zA-Z])",
     re.IGNORECASE,
 )
 
@@ -317,7 +317,7 @@ def extract_entities_from_item(
     then runs all applicable extractors.
     """
     text = item.text
-    source_ref = f"{source_file}:{item.line_range[0]}:{item.line_range[1]}"
+    source_ref = f"{source_file}:{item.line_start}:{item.line_end}"
     entity_type = CATEGORY_TO_TYPE.get(category, "fact")
     seen_ids: set[str] = set()
     entities: list[ExtractedEntity] = []
@@ -373,19 +373,18 @@ def extract_entities_from_section(
 ) -> list[ExtractedEntity]:
     """Extract entities from a parsed section using rules.
 
-    Iterates all categories and items, deduplicating by entity ID.
+    Section has a single category. Iterates all items, deduplicating by entity ID.
     """
     all_entities: list[ExtractedEntity] = []
     seen_ids: set[str] = set()
 
-    for cat_name, items in section.categories.items():
-        for item in items:
-            item_entities = extract_entities_from_item(item, cat_name, source_file)
-            for entity in item_entities:
-                if entity.id in seen_ids:
-                    continue
-                seen_ids.add(entity.id)
-                all_entities.append(entity)
+    for item in section.items:
+        item_entities = extract_entities_from_item(item, section.category, source_file)
+        for entity in item_entities:
+            if entity.id in seen_ids:
+                continue
+            seen_ids.add(entity.id)
+            all_entities.append(entity)
 
     return all_entities
 
