@@ -28,7 +28,8 @@ def temp_db_path():
 
 
 @pytest.fixture
-def seeded_db(temp_db_path):
+def seeded_conn(temp_db_path):
+    """Connection to a DB pre-seeded with test entities."""
     conn = init_db(temp_db_path)
     insert_entity(conn, {
         "id": "proj:homebrain", "type": "project", "name": "HomeBrain",
@@ -57,8 +58,8 @@ def seeded_db(temp_db_path):
         "rel_type": "RELATES_TO", "weight": 0.7,
         "evidence": "2026-05-24 co-occurrence",
     })
+    yield conn
     conn.close()
-    return temp_db_path
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +93,6 @@ def test_env_config(monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_WEAVER_MEMORY_DIR", "/tmp/mem")
     monkeypatch.setenv("KNOWLEDGE_WEAVER_LOG_LEVEL", "DEBUG")
 
-    # Re-import to pick up env changes (module-level constants)
     import importlib
     import knowledge_weaver.server as srv
     importlib.reload(srv)
@@ -121,73 +121,54 @@ def test_main_consolidate(temp_db_path, monkeypatch):
         # Should not crash even with no embedder
         exit_code = srv.main()
 
-    # Either ok (0) or error (1) but no exception
     assert exit_code in (0, 1)
 
     importlib.reload(srv)
 
 
-def test_knowledge_search_tool(seeded_db, monkeypatch):
+def test_knowledge_search_tool(seeded_conn):
     """Search tool registered and callable via tools module."""
-    monkeypatch.setenv("KNOWLEDGE_WEAVER_DB_PATH", seeded_db)
-
-    import importlib
-    import knowledge_weaver.server as srv
-    importlib.reload(srv)
-
-    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import knowledge_search
-    conn = init_db(seeded_db)
-    result = knowledge_search(conn, query="HomeBrain")
+    result = knowledge_search(seeded_conn, query="HomeBrain")
     assert result["total_hits"] >= 1
     assert any("HomeBrain" in r["name"] for r in result["results"])
 
 
-def test_knowledge_stats_tool(seeded_db):
+def test_knowledge_stats_tool(seeded_conn):
     """Stats tool returns entity counts."""
-    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import knowledge_stats
-    conn = init_db(seeded_db)
-    stats = knowledge_stats(conn)
+    stats = knowledge_stats(seeded_conn)
     assert stats["total_entities"] >= 3
     assert stats["total_relations"] >= 1
     assert "project" in stats["entity_counts"]
 
 
-def test_active_projects_tool(seeded_db):
+def test_active_projects_tool(seeded_conn):
     """Active projects tool lists HomeBrain."""
-    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import active_projects
-    conn = init_db(seeded_db)
-    result = active_projects(conn, lookback_days=14)
+    result = active_projects(seeded_conn, lookback_days=14)
     assert len(result["projects"]) >= 1
     assert any(p["entity_id"] == "proj:homebrain" for p in result["projects"])
 
 
-def test_preference_lookup_tool(seeded_db):
+def test_preference_lookup_tool(seeded_conn):
     """Preference lookup returns at least one preference."""
-    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import preference_lookup
-    conn = init_db(seeded_db)
-    result = preference_lookup(conn)
+    result = preference_lookup(seeded_conn)
     assert len(result["preferences"]) >= 1
 
 
-def test_decision_history_tool(seeded_db):
+def test_decision_history_tool(seeded_conn):
     """Decision history returns decisions matching topic."""
-    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import decision_history
-    conn = init_db(seeded_db)
-    result = decision_history(conn, topic="规则")
+    result = decision_history(seeded_conn, topic="规则")
     assert len(result["decisions"]) >= 1
 
 
-def test_knowledge_trace_tool(seeded_db):
+def test_knowledge_trace_tool(seeded_conn):
     """Knowledge trace returns entity and related data."""
-    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import knowledge_trace
-    conn = init_db(seeded_db)
-    result = knowledge_trace(conn, topic="HomeBrain")
+    result = knowledge_trace(seeded_conn, topic="HomeBrain")
     assert result["entity"] is not None
     assert result["entity"]["entity_id"] == "proj:homebrain"
 
@@ -202,13 +183,10 @@ def test_main_unknown_subcommand(capsys):
     assert "Unknown subcommand" in captured.err
 
 
-def test_server_tool_returns_json(seeded_db):
-    """MCP tool wrappers return valid JSON strings."""
+def test_server_tool_returns_json():
+    """MCP tools are registered with correct signatures."""
     from knowledge_weaver.server import create_server
-    import asyncio
-
     mcp = create_server()
-    # Verify the tools are registered with correct signatures
     tools = mcp._tool_manager.list_tools()
     tool_map = {t.name: t for t in tools}
 
@@ -219,7 +197,6 @@ def test_server_tool_returns_json(seeded_db):
 
 def test_default_env_values():
     """Default environment values are sensible."""
-    # Clear any env overrides
     saved_db = os.environ.pop("KNOWLEDGE_WEAVER_DB_PATH", None)
     saved_mem = os.environ.pop("KNOWLEDGE_WEAVER_MEMORY_DIR", None)
     saved_log = os.environ.pop("KNOWLEDGE_WEAVER_LOG_LEVEL", None)
