@@ -93,6 +93,7 @@ def create_server() -> FastMCP:
                 entity_type=entity_type or None,
                 max_results=max_results,
                 min_score=min_score,
+                embedder=get_embedder(),
             )
         finally:
             conn.close()
