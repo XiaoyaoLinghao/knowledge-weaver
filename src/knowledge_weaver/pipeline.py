@@ -319,10 +319,14 @@ def _process_file(
         existing_ids.add(extracted.id)
         entity_count += 1
 
-        # Collect for batch embedding
+        # Collect for batch embedding (skip if already has a vector)
         if embedder is not None and extracted.summary:
-            texts_to_embed.append(extracted.summary[:500])
-            entity_ids_to_embed.append(extracted.id)
+            existing_vec = conn.execute(
+                "SELECT 1 FROM entity_vectors WHERE entity_id=?", (extracted.id,)
+            ).fetchone()
+            if not existing_vec:
+                texts_to_embed.append(extracted.summary[:500])
+                entity_ids_to_embed.append(extracted.id)
 
     # Step 5: Link — within-file co-occurrence
     linker_entities = [

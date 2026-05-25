@@ -64,7 +64,7 @@ class EmbeddingClient:
                 all_results.extend(result)
             if i + self.MAX_BATCH_SIZE < len(texts):
                 import time
-                time.sleep(0.25)  # rate-limit: 4 batches/sec
+                time.sleep(3.0)  # rate-limit: Volcengine free tier QPS
         return all_results
 
     def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
