@@ -61,9 +61,10 @@ CREATE INDEX IF NOT EXISTS idx_access_log_time ON access_log(accessed_at);
 """
 
 VECTOR_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS entity_vectors USING vec0(
+CREATE TABLE IF NOT EXISTS entity_vectors (
     entity_id  TEXT PRIMARY KEY,
-    embedding  FLOAT[768]
+    embedding  TEXT NOT NULL,
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
 );
 """
 
@@ -88,13 +89,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
 
 
 def _init_vector_table(conn: sqlite3.Connection) -> None:
-    """Try to load sqlite-vec and create the virtual table."""
-    try:
-        conn.execute("SELECT vec_version()")
-    except Exception:
-        conn.enable_load_extension(True)
-        import sqlite_vec
-        sqlite_vec.load(conn)
+    """Create the entity_vectors table (plain SQLite, no extensions needed)."""
     conn.execute(VECTOR_SCHEMA)
     conn.commit()
 
@@ -237,3 +232,45 @@ def get_access_count(conn: sqlite3.Connection, entity_id: str) -> int:
         (entity_id,),
     ).fetchone()
     return row["cnt"] if row else 0
+
+
+def upsert_entity_vector(conn: sqlite3.Connection, entity_id: str, embedding: list[float]) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO entity_vectors(entity_id, embedding) VALUES (?, ?)",
+        (entity_id, json.dumps(embedding)),
+    )
+    conn.commit()
+
+
+def _cosine(vec_a: list[float], vec_b: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(vec_a, vec_b))
+    norm_a = sum(a * a for a in vec_a) ** 0.5
+    norm_b = sum(b * b for b in vec_b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def search_entity_vectors(conn: sqlite3.Connection, query_vec: list[float],
+                          limit: int = 10) -> list[sqlite3.Row]:
+    """Search entities by cosine similarity, computed in Python."""
+    rows = conn.execute(
+        "SELECT v.entity_id, v.embedding FROM entity_vectors v"
+    ).fetchall()
+    scored = []
+    for r in rows:
+        try:
+            vec = json.loads(r["embedding"])
+            sim = _cosine(query_vec, vec)
+            scored.append((sim, r["entity_id"]))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_ids = [eid for _, eid in scored[:limit]]
+    if not top_ids:
+        return []
+    placeholders = ",".join(["?" for _ in top_ids])
+    return conn.execute(
+        f"SELECT * FROM entities WHERE id IN ({placeholders})",
+        top_ids,
+    ).fetchall()
