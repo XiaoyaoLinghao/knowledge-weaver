@@ -1,0 +1,149 @@
+"""Tests for the entity extractor module."""
+
+from knowledge_weaver.parser import ParsedSection, ParsedItem
+from knowledge_weaver.extractor import (
+    ExtractedEntity,
+    generate_entity_id,
+    slugify,
+    extract_entities_from_section,
+    extract_entities_from_item,
+    extract_projects,
+    extract_decisions,
+    extract_preferences,
+    extract_risks,
+    extract_tasks,
+    extract_tech_keywords,
+)
+
+
+def _make_section(time: str = "00:30", date: str = "2026-05-24",
+                  categories: dict[str, list[str]] | None = None) -> ParsedSection:
+    """Helper to build a ParsedSection with text items."""
+    sec = ParsedSection(date=date, time=time)
+    if categories:
+        for cat, texts in categories.items():
+            sec.categories[cat] = [
+                ParsedItem(text=t, line_range=(1, 1)) for t in texts
+            ]
+    return sec
+
+
+# --- generate_entity_id / slugify ---
+
+def test_generate_entity_id():
+    assert generate_entity_id("decision", "设备聚合采用规则引擎优先") == "decision:shebeijuhecaiz"
+    assert generate_entity_id("project", "HomeBrain") == "proj:homebrain"
+    assert generate_entity_id("preference", "用户偏好将功能集成在 HomeBrain 内部") == "pref:yonghupianhaojianggongneng"
+
+
+def test_slugify_basic():
+    assert slugify("HomeBrain") == "homebrain"
+    assert slugify("HA Entity Naming Rule") == "ha_entity_naming_rule"
+    assert slugify("Docker Build Cache") == "docker_build_cache"
+
+
+# --- extract_projects ---
+
+def test_extract_project_entity():
+    text = "HomeBrain项目需要保持聚合器稳定运行"
+    results = extract_projects(text)
+    assert len(results) >= 1
+    names = [r["name"] for r in results]
+    assert "HomeBrain" in names
+    for r in results:
+        assert r["type"] == "project"
+
+
+# --- extract_decisions ---
+
+def test_extract_decision_entity():
+    text = "决定将聚合逻辑集成到HomeBrain自身，不依赖外部脚本"
+    results = extract_decisions(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "decision"
+    # Should extract a meaningful name, not the whole sentence
+    assert len(results[0]["name"]) < len(text)
+
+
+# --- extract_preferences ---
+
+def test_extract_preference_entity():
+    text = "用户偏好将功能集成在HomeBrain内部，而非外部脚本"
+    results = extract_preferences(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "preference"
+
+
+# --- extract_risks ---
+
+def test_extract_risk_entity():
+    text = "LLM聚合存在JSON格式错乱、输出截断的风险"
+    results = extract_risks(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "risk"
+
+
+# --- extract_tasks ---
+
+def test_extract_task_completed():
+    text = "完成了HomeBrain设备聚合API的开发和测试"
+    results = extract_tasks(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "task"
+    assert results[0].get("status") == "completed" or "metadata" in results[0]
+
+
+def test_extract_task_todo():
+    text = "后续计划给SpotMicro增加视觉避障模块"
+    results = extract_tasks(text)
+    assert len(results) >= 1
+    assert results[0]["type"] == "task"
+
+
+# --- extract_tech_keywords ---
+
+def test_extract_tech_keyword():
+    text = "使用ESP32和Python开发，部署在Docker中，HA集成通过STM32"
+    results = extract_tech_keywords(text)
+    assert len(results) >= 1
+    keywords = [r["name"] for r in results]
+    assert "ESP32" in keywords
+    assert "Python" in keywords
+    assert "Docker" in keywords
+
+
+# --- extract_entities_from_item ---
+
+def test_extract_from_item():
+    item = ParsedItem(text="决定使用规则引擎而非LLM批量处理", line_range=(5, 5))
+    entities = extract_entities_from_item(item, "决策与结论", "2026-05-24.md")
+    assert len(entities) >= 1
+    assert entities[0].type == "decision"
+    assert "2026-05-24.md:5:5" in entities[0].source_lines
+
+
+# --- extract_entities_from_section ---
+
+def test_extract_from_section():
+    sec = _make_section(categories={
+        "决策与结论": ["决定使用规则引擎而非LLM批量处理"],
+        "风险与注意事项": ["Docker build缓存可能导致nginx配置未更新"],
+    })
+    entities = extract_entities_from_section(sec, "2026-05-24.md")
+    types = {e.type for e in entities}
+    assert "decision" in types or "risk" in types
+    assert len(entities) >= 1
+
+
+# --- dedup ---
+
+def test_extract_and_dedup():
+    sec = _make_section(categories={
+        "技术/项目要点": [
+            "HA实体命名规则：{房间} {设备名} [{子类别}] {参数}，95.9%包含三段",
+            "HA实体命名规则：{房间} {设备名} [{子类别}] {参数}，95.9%包含三段",
+        ]
+    })
+    entities = extract_entities_from_section(sec, "2026-05-24.md")
+    ids = [e.id for e in entities]
+    assert len(ids) == len(set(ids)), f"Duplicate IDs found: {ids}"
