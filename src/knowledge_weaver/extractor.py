@@ -9,6 +9,8 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from pypinyin import lazy_pinyin
+
 from knowledge_weaver.parser import ParsedSection, ParsedItem
 
 # DMA 8 categories → entity type mapping
@@ -65,7 +67,7 @@ _TECH_KEYWORDS = [
 ]
 
 _TECH_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(kw) for kw in _TECH_KEYWORDS) + r")\b",
+    r"(?:^|[^a-zA-Z])(" + "|".join(re.escape(kw) for kw in _TECH_KEYWORDS) + r")(?:[^a-zA-Z]|$)",
     re.IGNORECASE,
 )
 
@@ -128,15 +130,16 @@ class ExtractedEntity:
 def slugify(name: str) -> str:
     """Convert a name to lowercase_slug format for entity IDs.
 
-    - Chinese characters are kept as-is (pinyin would be nice but adds deps)
-    - Non-alphanumeric/non-CJK chars become underscores
+    - Chinese characters are converted to pinyin (no tone marks)
+    - Non-alphanumeric chars become underscores
     - Consecutive underscores collapsed
     - Truncated to 30 chars for stability
     """
-    # Remove spaces, convert to lowercase
-    s = name.lower().strip()
-    # Replace non-alphanumeric, non-CJK with underscore
-    s = re.sub(r"[^a-z0-9一-龥]", "_", s)
+    # Convert Chinese characters to pinyin
+    parts = lazy_pinyin(name)
+    s = "".join(parts).lower().strip()
+    # Replace non-alphanumeric with underscore
+    s = re.sub(r"[^a-z0-9]", "_", s)
     # Collapse consecutive underscores
     s = re.sub(r"_+", "_", s)
     # Strip leading/trailing underscores
