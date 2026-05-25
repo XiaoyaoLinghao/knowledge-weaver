@@ -1,0 +1,249 @@
+import pytest
+
+from knowledge_weaver.db import init_db, insert_entity, insert_relation, get_entity, get_relations_for_entity
+from knowledge_weaver.linker import (
+    ExtractedEntity,
+    ParsedSection,
+    ParsedFile,
+    LinkedRelation,
+    generate_relation_id,
+    link_entities_in_file,
+    link_cross_day,
+    link_project_dependencies,
+)
+
+
+# --- Helpers ---
+
+def _make_entity_dict(e: ExtractedEntity, importance: float = 0.5, day_count: int = 1) -> dict:
+    return {
+        "id": e.id,
+        "type": e.type,
+        "name": e.name,
+        "summary": e.summary,
+        "importance": importance,
+        "first_seen": e.first_seen,
+        "last_seen": e.last_seen,
+        "day_count": day_count,
+    }
+
+
+# --- Tests ---
+
+def test_generate_relation_id():
+    id1 = generate_relation_id("e1", "e2", "RELATES_TO")
+    id2 = generate_relation_id("e1", "e2", "RELATES_TO")
+    assert id1 == id2
+    assert id1.startswith("rel:")
+
+    id3 = generate_relation_id("e2", "e1", "RELATES_TO")
+    assert id1 != id3
+
+    id4 = generate_relation_id("e1", "e2", "DEPENDS_ON")
+    assert id1 != id4
+
+
+def test_link_same_entity_id(temp_db_path):
+    conn = init_db(temp_db_path)
+
+    insert_entity(conn, {
+        "id": "entity-001",
+        "type": "project",
+        "name": "Test Project",
+        "summary": "A test project",
+        "importance": 0.5,
+        "first_seen": "2024-01-01",
+        "last_seen": "2024-01-01",
+        "day_count": 1,
+    })
+
+    new_entity = ExtractedEntity(
+        id="entity-001",
+        type="project",
+        name="Test Project",
+        summary="A test project",
+        first_seen="2024-01-02",
+        last_seen="2024-01-02",
+    )
+
+    relations = link_cross_day(conn, [new_entity], set())
+
+    assert len(relations) == 1
+    assert relations[0].rel_type == "CONTINUES"
+    assert relations[0].weight == 1.0
+    assert relations[0].from_entity == "entity-001"
+    assert relations[0].to_entity == "entity-001"
+
+    updated = get_entity(conn, "entity-001")
+    assert updated["day_count"] == 2
+    assert updated["last_seen"] == "2024-01-02"
+
+
+def test_link_co_occurrence(temp_db_path):
+    conn = init_db(temp_db_path)
+
+    e1 = ExtractedEntity(
+        id="e-aa", type="project", name="ProjA", summary="Project A",
+        first_seen="2024-01-01", last_seen="2024-01-01", section_title="Core",
+    )
+    e2 = ExtractedEntity(
+        id="e-bb", type="task", name="Task1", summary="A task",
+        first_seen="2024-01-01", last_seen="2024-01-01", section_title="Core",
+    )
+    e3 = ExtractedEntity(
+        id="e-cc", type="decision", name="Dec1", summary="A decision",
+        first_seen="2024-01-01", last_seen="2024-01-01", section_title="Other",
+    )
+
+    for e in [e1, e2, e3]:
+        insert_entity(conn, _make_entity_dict(e))
+
+    parsed_file = ParsedFile(
+        date="2024-01-01",
+        path="/notes/2024-01-01.md",
+        sections=[
+            ParsedSection(title="Core", line_range=(1, 10)),
+            ParsedSection(title="Other", line_range=(11, 20)),
+        ],
+    )
+
+    relations = link_entities_in_file(conn, [e1, e2, e3], parsed_file, "/notes/2024-01-01.md")
+
+    # e1 and e2 are in same section → RELATES_TO weight 0.5
+    same_section = [r for r in relations if r.rel_type == "RELATES_TO" and r.weight == 0.5]
+    assert len(same_section) >= 1
+    # e1 and e3 in different sections → RELATES_TO weight 0.3
+    cross_section = [r for r in relations if r.rel_type == "RELATES_TO" and r.weight == 0.3]
+    assert len(cross_section) >= 1
+
+
+def test_link_project_task(temp_db_path):
+    conn = init_db(temp_db_path)
+
+    project = ExtractedEntity(
+        id="proj-alpha", type="project", name="Alpha",
+        summary="Project Alpha — the main initiative",
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    )
+    task = ExtractedEntity(
+        id="task-1", type="task", name="Set up Alpha CI",
+        summary="Configure CI pipeline for Alpha",
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    )
+    unrelated = ExtractedEntity(
+        id="task-2", type="task", name="Order supplies",
+        summary="Order office supplies",
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    )
+
+    for e in [project, task, unrelated]:
+        insert_entity(conn, _make_entity_dict(e))
+
+    relations = link_project_dependencies(conn, [project, task, unrelated])
+
+    deps = [r for r in relations if r.rel_type == "DEPENDS_ON"]
+    assert len(deps) >= 1
+    dep = deps[0]
+    assert dep.from_entity == "task-1"
+    assert dep.to_entity == "proj-alpha"
+    assert dep.weight == 0.7
+
+    # unrelated task should not get a DEPENDS_ON
+    for r in relations:
+        assert not (r.from_entity == "task-2" and r.to_entity == "proj-alpha")
+
+
+def test_link_decision_project(temp_db_path):
+    conn = init_db(temp_db_path)
+
+    project = ExtractedEntity(
+        id="proj-beta", type="project", name="Beta",
+        summary="Project Beta",
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    )
+    decision = ExtractedEntity(
+        id="dec-1", type="decision", name="Use React for Beta frontend",
+        summary="Decided to use React after evaluating options for Beta",
+        first_seen="2024-01-01", last_seen="2024-01-01",
+    )
+
+    for e in [project, decision]:
+        insert_entity(conn, _make_entity_dict(e))
+
+    relations = link_project_dependencies(conn, [project, decision])
+
+    deps = [r for r in relations if r.rel_type == "DEPENDS_ON"]
+    assert len(deps) >= 1
+    dep = deps[0]
+    assert dep.from_entity == "dec-1"
+    assert dep.to_entity == "proj-beta"
+    assert dep.weight == 0.7
+
+
+def test_link_cross_day_co_occurrence(temp_db_path):
+    conn = init_db(temp_db_path)
+
+    insert_entity(conn, {
+        "id": "ent-a", "type": "project", "name": "Project A", "summary": "...",
+        "importance": 0.5, "first_seen": "2024-01-01", "last_seen": "2024-01-01",
+        "day_count": 1,
+    })
+    insert_entity(conn, {
+        "id": "ent-b", "type": "project", "name": "Project B", "summary": "...",
+        "importance": 0.5, "first_seen": "2024-01-01", "last_seen": "2024-01-01",
+        "day_count": 1,
+    })
+    insert_entity(conn, {
+        "id": "ent-c", "type": "project", "name": "Project C", "summary": "...",
+        "importance": 0.5, "first_seen": "2024-01-01", "last_seen": "2024-01-01",
+        "day_count": 1,
+    })
+
+    new_entities = [
+        ExtractedEntity(id="ent-a", type="project", name="Project A", summary="...",
+                        first_seen="2024-01-02", last_seen="2024-01-02"),
+        ExtractedEntity(id="ent-b", type="project", name="Project B", summary="...",
+                        first_seen="2024-01-02", last_seen="2024-01-02"),
+        ExtractedEntity(id="ent-d", type="project", name="Project D", summary="New project",
+                        first_seen="2024-01-02", last_seen="2024-01-02"),
+    ]
+
+    relations = link_cross_day(conn, new_entities, set())
+
+    # ent-a and ent-b should get CONTINUES, ent-d is new so none
+    assert len(relations) == 2
+    assert all(r.rel_type == "CONTINUES" for r in relations)
+
+    assert get_entity(conn, "ent-a")["day_count"] == 2
+    assert get_entity(conn, "ent-b")["day_count"] == 2
+    assert get_entity(conn, "ent-c")["day_count"] == 1  # unchanged
+    # ent-d was inserted with day_count 1
+    assert get_entity(conn, "ent-d") is not None
+
+
+def test_dedup_relations(temp_db_path):
+    conn = init_db(temp_db_path)
+
+    e1 = ExtractedEntity(
+        id="e-1", type="project", name="ProjX", summary="Project X",
+        first_seen="2024-01-01", last_seen="2024-01-01", section_title="Core",
+    )
+    e2 = ExtractedEntity(
+        id="e-2", type="task", name="TaskX", summary="A task",
+        first_seen="2024-01-01", last_seen="2024-01-01", section_title="Core",
+    )
+    insert_entity(conn, _make_entity_dict(e1))
+    insert_entity(conn, _make_entity_dict(e2))
+
+    parsed_file = ParsedFile(
+        date="2024-01-01",
+        path="/notes/2024-01-01.md",
+        sections=[ParsedSection(title="Core", line_range=(1, 10))],
+    )
+
+    link_entities_in_file(conn, [e1, e2], parsed_file, "/notes/2024-01-01.md")
+    link_entities_in_file(conn, [e1, e2], parsed_file, "/notes/2024-01-01.md")
+
+    all_rels = conn.execute("SELECT id FROM relations").fetchall()
+    unique_ids = {r["id"] for r in all_rels}
+    assert len(all_rels) == len(unique_ids), "Duplicate relation rows detected"
