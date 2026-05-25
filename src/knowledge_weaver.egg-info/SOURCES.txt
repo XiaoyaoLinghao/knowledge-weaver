@@ -1,8 +1,0 @@
-README.md
-pyproject.toml
-src/knowledge_weaver/__init__.py
-src/knowledge_weaver.egg-info/PKG-INFO
-src/knowledge_weaver.egg-info/SOURCES.txt
-src/knowledge_weaver.egg-info/dependency_links.txt
-src/knowledge_weaver.egg-info/requires.txt
-src/knowledge_weaver.egg-info/top_level.txt
