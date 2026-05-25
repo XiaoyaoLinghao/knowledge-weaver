@@ -135,16 +135,20 @@ def test_knowledge_search_tool(seeded_db, monkeypatch):
     import knowledge_weaver.server as srv
     importlib.reload(srv)
 
+    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import knowledge_search
-    result = knowledge_search(seeded_db, query="HomeBrain")
+    conn = init_db(seeded_db)
+    result = knowledge_search(conn, query="HomeBrain")
     assert result["total_hits"] >= 1
     assert any("HomeBrain" in r["name"] for r in result["results"])
 
 
 def test_knowledge_stats_tool(seeded_db):
     """Stats tool returns entity counts."""
+    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import knowledge_stats
-    stats = knowledge_stats(seeded_db)
+    conn = init_db(seeded_db)
+    stats = knowledge_stats(conn)
     assert stats["total_entities"] >= 3
     assert stats["total_relations"] >= 1
     assert "project" in stats["entity_counts"]
@@ -152,30 +156,38 @@ def test_knowledge_stats_tool(seeded_db):
 
 def test_active_projects_tool(seeded_db):
     """Active projects tool lists HomeBrain."""
+    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import active_projects
-    result = active_projects(seeded_db, lookback_days=14)
+    conn = init_db(seeded_db)
+    result = active_projects(conn, lookback_days=14)
     assert len(result["projects"]) >= 1
     assert any(p["entity_id"] == "proj:homebrain" for p in result["projects"])
 
 
 def test_preference_lookup_tool(seeded_db):
     """Preference lookup returns at least one preference."""
+    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import preference_lookup
-    result = preference_lookup(seeded_db)
+    conn = init_db(seeded_db)
+    result = preference_lookup(conn)
     assert len(result["preferences"]) >= 1
 
 
 def test_decision_history_tool(seeded_db):
     """Decision history returns decisions matching topic."""
+    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import decision_history
-    result = decision_history(seeded_db, topic="规则")
+    conn = init_db(seeded_db)
+    result = decision_history(conn, topic="规则")
     assert len(result["decisions"]) >= 1
 
 
 def test_knowledge_trace_tool(seeded_db):
     """Knowledge trace returns entity and related data."""
+    from knowledge_weaver.db import init_db
     from knowledge_weaver.tools import knowledge_trace
-    result = knowledge_trace(seeded_db, topic="HomeBrain")
+    conn = init_db(seeded_db)
+    result = knowledge_trace(conn, topic="HomeBrain")
     assert result["entity"] is not None
     assert result["entity"]["entity_id"] == "proj:homebrain"
 

@@ -11,10 +11,10 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
+import sqlite3
 import sys
 
 from mcp.server.fastmcp import FastMCP
@@ -44,6 +44,12 @@ def _configure_logging() -> None:
     )
 
 
+def _get_conn() -> sqlite3.Connection:
+    """Get a fresh DB connection for tool calls."""
+    from knowledge_weaver.db import init_db
+    return init_db(DB_PATH)
+
+
 def get_embedder():
     """Lazy embedder factory — returns EmbeddingClient or None."""
     from knowledge_weaver.embedder import get_embedder as _get
@@ -58,11 +64,7 @@ def create_server() -> FastMCP:
     """Create and configure the MCP server with all 7 tools."""
     mcp = FastMCP("knowledge-weaver")
 
-    def _get_conn():
-        """Open a DB connection for tool use."""
-        from knowledge_weaver.db import init_db
-        return init_db(DB_PATH)
-
+    # --- Tool 1: knowledge_search ---
     @mcp.tool()
     async def knowledge_search(
         query: str,
@@ -92,6 +94,7 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
+    # --- Tool 2: knowledge_trace ---
     @mcp.tool()
     async def knowledge_trace(topic: str, max_depth: int = 2) -> str:
         """Trace a topic's full timeline across all indexed days, including related entities and decisions.
@@ -108,6 +111,7 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
+    # --- Tool 3: active_projects ---
     @mcp.tool()
     async def active_projects(lookback_days: int = 14) -> str:
         """List currently active projects with status and open tasks.
@@ -123,6 +127,7 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
+    # --- Tool 4: preference_lookup ---
     @mcp.tool()
     async def preference_lookup(topic: str = "", domain: str = "") -> str:
         """Look up user preferences and habits, optionally filtered by topic or domain.
@@ -139,6 +144,7 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
+    # --- Tool 5: decision_history ---
     @mcp.tool()
     async def decision_history(topic: str, include_risk: bool = True) -> str:
         """Query historical decisions and their rationale on a given topic.
@@ -155,6 +161,7 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
+    # --- Tool 6: knowledge_stats ---
     @mcp.tool()
     async def knowledge_stats() -> str:
         """System status overview: entity counts, indexed days, DB size."""
@@ -166,6 +173,7 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
+    # --- Tool 7: knowledge_consolidate ---
     @mcp.tool()
     async def knowledge_consolidate() -> str:
         """Manually trigger knowledge consolidation from DMA daily memory files.
@@ -179,7 +187,7 @@ def create_server() -> FastMCP:
             return json.dumps({
                 "status": "error",
                 "error": "Embedding not configured. Set EMBEDDING_BASE_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL.",
-            })
+            }, ensure_ascii=False)
 
         result = run_consolidation(DB_PATH, MEMORY_DIR, embedder)
         return json.dumps({
