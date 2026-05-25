@@ -15,7 +15,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Default vector dimension for bge-large-zh-v1.5
-DEFAULT_DIMENSION = 1024
+DEFAULT_DIMENSION = 2048  # doubao-embedding-vision
 
 
 class EmbeddingClient:
@@ -47,43 +47,53 @@ class EmbeddingClient:
         results = self.embed_batch([text])
         return results[0] if results else []
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed multiple texts in one API call.
+    MAX_BATCH_SIZE = 10  # Volcengine limit
 
-        Returns a list of embedding vectors (same order as input).
-        Returns an empty list on any error (logs warning).
-        """
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed multiple texts, auto-splitting into API-compliant batch sizes."""
         if not texts:
             return []
 
+        all_results: list[list[float]] = []
+        for i in range(0, len(texts), self.MAX_BATCH_SIZE):
+            chunk = texts[i:i + self.MAX_BATCH_SIZE]
+            result = self._embed_chunk(chunk)
+            if not result:
+                all_results.extend([[] for _ in chunk])
+            else:
+                all_results.extend(result)
+            if i + self.MAX_BATCH_SIZE < len(texts):
+                import time
+                time.sleep(0.25)  # rate-limit: 4 batches/sec
+        return all_results
+
+    def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
+        import time
         url = f"{self.base_url}/embeddings"
-        try:
-            resp = self._client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"model": self.model, "input": texts},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # Sort by index to guarantee input order is preserved
-            items = sorted(data.get("data", []), key=lambda d: d.get("index", 0))
-            return [item["embedding"] for item in items]
-        except httpx.HTTPStatusError as e:
-            logger.warning(
-                "Embedding API returned HTTP %s: %s",
-                e.response.status_code,
-                e.response.text[:200],
-            )
-            return []
-        except httpx.RequestError as e:
-            logger.warning("Embedding API request failed: %s", e)
-            return []
-        except Exception as e:
-            logger.warning("Embedding API unexpected error: %s", e)
-            return []
+        for attempt in range(3):
+            try:
+                resp = self._client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"model": self.model, "input": texts},
+                )
+                if resp.status_code == 429 and attempt < 2:
+                    time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                items = sorted(data.get("data", []), key=lambda d: d.get("index", 0))
+                return [item["embedding"] for item in items]
+            except httpx.HTTPStatusError as e:
+                logger.warning("Embedding API HTTP %s: %s", e.response.status_code, e.response.text[:150])
+                return []
+            except httpx.RequestError as e:
+                logger.warning("Embedding API request failed: %s", e)
+                return []
+        return []
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
