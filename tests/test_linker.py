@@ -112,9 +112,9 @@ def test_link_co_occurrence(temp_db_path):
     # e1 and e2 are in same section → RELATES_TO weight 0.5
     same_section = [r for r in relations if r.rel_type == "RELATES_TO" and r.weight == 0.5]
     assert len(same_section) >= 1
-    # e1 and e3 in different sections → RELATES_TO weight 0.3
+    # e3 is in different section → no cross-section link created (prevents O(n²) explosion)
     cross_section = [r for r in relations if r.rel_type == "RELATES_TO" and r.weight == 0.3]
-    assert len(cross_section) >= 1
+    assert len(cross_section) == 0
 
 
 def test_link_project_task(temp_db_path):

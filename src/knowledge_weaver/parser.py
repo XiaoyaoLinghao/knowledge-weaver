@@ -118,10 +118,29 @@ def _parse_frontmatter(lines: list[str]) -> tuple[str, str, int]:
     return title, date, body_start
 
 
+_CATEGORY_MARKER_RE = re.compile(r"^\*\*(.+?)\*\*$")
+
+
 def _parse_body(lines: list[str], start: int) -> list[ParsedSection]:
-    """Parse sections and items from the body of the document."""
+    """Parse sections and items from the body of the document.
+
+    Supports two DMA file formats:
+
+    Format A (simplified / fixture):
+      ## 核心要点          ← category heading
+      - item 1
+      ## 决策与结论        ← category heading
+      - item 2
+
+    Format B (real DMA):
+      ## 00:30             ← time slot
+      **核心要点**         ← category marker (bold)
+      - item 1
+      **决策与结论**       ← next category marker
+      - item 2
+    """
     sections: list[ParsedSection] = []
-    current_section: ParsedSection | None = None
+    current_category: str = "fact"
     i = start
 
     while i < len(lines):
@@ -133,20 +152,54 @@ def _parse_body(lines: list[str], start: int) -> list[ParsedSection]:
             i += 1
             continue
 
-        # Detect section heading: ## Title
+        # Detect ## heading: could be time slot (HH:MM) or category name
         heading_match = re.match(r"^##\s+(.+)$", stripped)
         if heading_match:
             heading = heading_match.group(1).strip()
-            category = DMA_CATEGORY_MAP.get(heading, "fact")
-            current_section = ParsedSection(title=heading, category=category)
-            sections.append(current_section)
+            mapped = DMA_CATEGORY_MAP.get(heading)
+            if mapped is not None:
+                # Format A: ## 核心要点 — heading IS the category
+                current_category = mapped
+                sections.append(ParsedSection(title=heading, category=mapped))
+            elif re.match(r"^\d{1,2}:\d{2}", heading):
+                # Format B: ## 00:30 — time slot marker, reset category
+                current_category = "fact"
+            else:
+                # Unknown heading → treat as custom section with fact category
+                current_category = "fact"
+                sections.append(ParsedSection(title=heading, category="fact"))
+            i += 1
+            continue
+
+        # Detect category marker: **核心要点** or **决策与结论** (Format B)
+        cat_match = _CATEGORY_MARKER_RE.match(stripped)
+        if cat_match:
+            candidate = cat_match.group(1).strip()
+            mapped = DMA_CATEGORY_MAP.get(candidate)
+            if mapped is not None:
+                current_category = mapped
+                sections.append(ParsedSection(title=candidate, category=mapped))
             i += 1
             continue
 
         # Detect bullet item: - content
-        if stripped.startswith("- ") and current_section is not None:
+        if stripped.startswith("- "):
+            # Attach to last section with matching category
+            target = None
+            for s in reversed(sections):
+                if s.category == current_category:
+                    target = s
+                    break
+            if target is None:
+                title = [k for k, v in DMA_CATEGORY_MAP.items() if v == current_category]
+                target = ParsedSection(
+                    title=title[0] if title else current_category,
+                    category=current_category,
+                )
+                sections.append(target)
+
             item, end_i = _parse_item(lines, i)
-            current_section.items.append(item)
+            target.items.append(item)
             i = end_i + 1
             continue
 

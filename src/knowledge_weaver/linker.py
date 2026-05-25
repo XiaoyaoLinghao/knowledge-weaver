@@ -51,44 +51,52 @@ def generate_relation_id(from_id: str, to_id: str, rel_type: str) -> str:
     return f"rel:{from_id}->{to_id}:{rel_type}"
 
 
+MAX_PER_FILE_RELATIONS = 500
+
+
 def link_entities_in_file(
     conn,
     entities: list[ExtractedEntity],
     parsed_file: ParsedFile,
     source_path: str,
 ) -> list[LinkedRelation]:
-    """Create relations between entities within the same file (co-occurrence linking).
+    """Create relations between entities within the same file.
 
     Rules:
     - Same section -> RELATES_TO, weight 0.5
     - Different sections same day -> RELATES_TO, weight 0.3
+    - Capped at MAX_PER_FILE_RELATIONS to prevent O(n²) explosion
     """
     relations: list[LinkedRelation] = []
 
-    for i in range(len(entities)):
-        for j in range(i + 1, len(entities)):
-            e1, e2 = entities[i], entities[j]
-            same_section = e1.section_title == e2.section_title
-            weight = 0.5 if same_section else 0.3
-            evidence = e1.section_title if same_section else "different_sections"
+    # Group entities by section for targeted linking
+    by_section: dict[str, list[ExtractedEntity]] = {}
+    for e in entities:
+        by_section.setdefault(e.section_title, []).append(e)
 
-            rel = LinkedRelation(
-                id=generate_relation_id(e1.id, e2.id, "RELATES_TO"),
-                from_entity=e1.id,
-                to_entity=e2.id,
-                rel_type="RELATES_TO",
-                weight=weight,
-                evidence=evidence,
-            )
-            insert_relation(conn, {
-                "id": rel.id,
-                "from_entity": rel.from_entity,
-                "to_entity": rel.to_entity,
-                "rel_type": rel.rel_type,
-                "weight": rel.weight,
-                "evidence": rel.evidence,
-            })
-            relations.append(rel)
+    # Same-section linking (weight 0.5)
+    for section_entities in by_section.values():
+        if len(section_entities) <= 1:
+            continue
+        for i in range(len(section_entities)):
+            for j in range(i + 1, len(section_entities)):
+                if len(relations) >= MAX_PER_FILE_RELATIONS:
+                    break
+                e1, e2 = section_entities[i], section_entities[j]
+                rel = LinkedRelation(
+                    id=generate_relation_id(e1.id, e2.id, "RELATES_TO"),
+                    from_entity=e1.id, to_entity=e2.id,
+                    rel_type="RELATES_TO", weight=0.5,
+                    evidence=e1.section_title,
+                )
+                insert_relation(conn, {
+                    "id": rel.id, "from_entity": rel.from_entity,
+                    "to_entity": rel.to_entity, "rel_type": rel.rel_type,
+                    "weight": rel.weight, "evidence": rel.evidence,
+                })
+                relations.append(rel)
+            if len(relations) >= MAX_PER_FILE_RELATIONS:
+                break
 
     return relations
 

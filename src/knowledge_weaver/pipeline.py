@@ -252,7 +252,12 @@ def _process_file(
 
     relative_path = f"memory/{filename}"
     for section in parsed.sections:
-        section_entities = extract_entities_from_section(section, relative_path)
+        # Pass the DMA category name (section.title) so extract_entities_from_item
+        # can map it to the correct entity type via CATEGORY_TO_TYPE.
+        # section.category holds the pre-mapped entity type; pass the raw title instead.
+        section_entities = extract_entities_from_section(
+            section, relative_path, dma_category=section.title
+        )
         for ent in section_entities:
             if ent.id not in {e.id for e in all_extracted}:
                 all_extracted.append(ent)

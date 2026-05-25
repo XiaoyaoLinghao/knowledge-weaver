@@ -53,9 +53,23 @@ DEFAULT_IMPORTANCE: dict[str, float] = {
 
 # Known project names
 _PROJECT_PATTERN = re.compile(
-    r"(HomeBrain|心连心|SpotMicro|OpenClaw|Mnemo|Knowledge\s*Weaver)",
+    r"(HomeBrain|心连心|SpotMicro|OpenClaw|Mnemo|Knowledge\s*Weaver|KnowledgeWeaver)",
     re.IGNORECASE,
 )
+
+# Items that look like DMA processing artifacts, not real knowledge
+_GARBAGE_PATTERNS = [
+    re.compile(r".*摘要失败.*"),
+    re.compile(r".*见日志.*"),
+]
+
+_GARBAGE_NAMES = {
+    "", "无", "是", "否", "沟通直接", "确认", "-",
+    "潜在", "暂缓", "制定", "事项", "恢复", "行", "任务",
+    '"', "）", "（", "、", "。", "，",
+}
+
+_GARBAGE_NAME_MIN_LENGTH = 2  # minimum meaningful name length
 
 # Tech keywords (case-insensitive matching, output preserves original case)
 _TECH_KEYWORDS = [
@@ -165,7 +179,7 @@ def extract_projects(text: str) -> list[dict]:
         proj_name = m.group(0)
         # Normalize capitalization
         lower = proj_name.lower().replace(" ", "")
-        for original in ["HomeBrain", "OpenClaw", "SpotMicro", "Mnemo", "KnowledgeWeaver"]:
+        for original in ["HomeBrain", "OpenClaw", "SpotMicro", "Mnemo", "KnowledgeWeaver", "Knowledge Weaver"]:
             if lower == original.lower():
                 proj_name = original
                 break
@@ -306,6 +320,36 @@ def extract_tasks(text: str) -> list[dict]:
 # --- Section-level extraction ---
 
 
+def _is_garbage(text: str) -> bool:
+    """Return True if the text looks like a DMA processing artifact, not real knowledge."""
+    stripped = text.strip()
+    if stripped in _GARBAGE_NAMES:
+        return True
+    if len(stripped) <= _GARBAGE_NAME_MIN_LENGTH:
+        return True
+    for pat in _GARBAGE_PATTERNS:
+        if pat.match(stripped):
+            return True
+    return False
+
+
+def _is_garbage_name(name: str) -> bool:
+    """Return True if the extracted entity name is not meaningful."""
+    stripped = name.strip()
+    if not stripped:
+        return True
+    if stripped in _GARBAGE_NAMES:
+        return True
+    # Single-character names are never meaningful
+    # Two-char is OK for acronyms (HA, MQTT→4 chars) but not for generic words
+    if len(stripped) <= 1:
+        return True
+    # Check if the name is purely punctuation/symbols
+    if all(c in '（）()""''""【】[]{}，。！？、；：…·*' for c in stripped):
+        return True
+    return False
+
+
 def extract_entities_from_item(
     item: ParsedItem,
     category: str,
@@ -317,6 +361,8 @@ def extract_entities_from_item(
     then runs all applicable extractors.
     """
     text = item.text
+    if _is_garbage(text):
+        return []
     source_ref = f"{source_file}:{item.line_start}:{item.line_end}"
     entity_type = CATEGORY_TO_TYPE.get(category, "fact")
     seen_ids: set[str] = set()
@@ -324,6 +370,9 @@ def extract_entities_from_item(
 
     def _add(eid: str, etype: str, name: str, summary: str, **meta):
         if eid in seen_ids:
+            return
+        # Skip entities with garbage names (too short or known junk)
+        if _is_garbage_name(name):
             return
         seen_ids.add(eid)
         entities.append(ExtractedEntity(
@@ -370,16 +419,21 @@ def extract_entities_from_item(
 def extract_entities_from_section(
     section: ParsedSection,
     source_file: str,
+    dma_category: str | None = None,
 ) -> list[ExtractedEntity]:
     """Extract entities from a parsed section using rules.
 
     Section has a single category. Iterates all items, deduplicating by entity ID.
+    dma_category: the original DMA category name (e.g. "核心要点"), used to determine
+    the primary entity type. Defaults to section.category if not provided.
     """
     all_entities: list[ExtractedEntity] = []
     seen_ids: set[str] = set()
 
+    cat = dma_category if dma_category else section.category
+
     for item in section.items:
-        item_entities = extract_entities_from_item(item, section.category, source_file)
+        item_entities = extract_entities_from_item(item, cat, source_file)
         for entity in item_entities:
             if entity.id in seen_ids:
                 continue
