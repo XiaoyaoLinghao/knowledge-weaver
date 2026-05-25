@@ -15,7 +15,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Default vector dimension for bge-large-zh-v1.5
-DEFAULT_DIMENSION = 768
+DEFAULT_DIMENSION = 1024
 
 
 class EmbeddingClient:
