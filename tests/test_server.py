@@ -32,11 +32,11 @@ def seeded_conn(temp_db_path):
     """Connection to a DB pre-seeded with test entities."""
     conn = init_db(temp_db_path)
     insert_entity(conn, {
-        "id": "proj:homebrain", "type": "project", "name": "HomeBrain",
+        "id": "proj:exampleproject", "type": "project", "name": "ExampleProject",
         "summary": "智能家居控制系统", "importance": 0.85,
         "first_seen": "2026-05-22", "last_seen": "2026-05-24",
         "day_count": 3, "source_lines": '["2026-05-24.md:1:1"]',
-        "metadata": '{"tags":["homebrain","ha"]}',
+        "metadata": '{"tags":["exampleproject","ha"]}',
     })
     insert_entity(conn, {
         "id": "decision:rule_engine", "type": "decision", "name": "规则引擎决策",
@@ -53,8 +53,8 @@ def seeded_conn(temp_db_path):
         "metadata": '{"dma_category":"用户偏好与习惯"}',
     })
     insert_relation(conn, {
-        "id": "rel:proj:homebrain->decision:rule_engine",
-        "from_entity": "proj:homebrain", "to_entity": "decision:rule_engine",
+        "id": "rel:proj:exampleproject->decision:rule_engine",
+        "from_entity": "proj:exampleproject", "to_entity": "decision:rule_engine",
         "rel_type": "RELATES_TO", "weight": 0.7,
         "evidence": "2026-05-24 co-occurrence",
     })
@@ -129,9 +129,9 @@ def test_main_consolidate(temp_db_path, monkeypatch):
 def test_knowledge_search_tool(seeded_conn):
     """Search tool registered and callable via tools module."""
     from knowledge_weaver.tools import knowledge_search
-    result = knowledge_search(seeded_conn, query="HomeBrain")
+    result = knowledge_search(seeded_conn, query="ExampleProject")
     assert result["total_hits"] >= 1
-    assert any("HomeBrain" in r["name"] for r in result["results"])
+    assert any("ExampleProject" in r["name"] for r in result["results"])
 
 
 def test_knowledge_stats_tool(seeded_conn):
@@ -144,11 +144,11 @@ def test_knowledge_stats_tool(seeded_conn):
 
 
 def test_active_projects_tool(seeded_conn):
-    """Active projects tool lists HomeBrain."""
+    """Active projects tool lists ExampleProject."""
     from knowledge_weaver.tools import active_projects
     result = active_projects(seeded_conn, lookback_days=14)
     assert len(result["projects"]) >= 1
-    assert any(p["entity_id"] == "proj:homebrain" for p in result["projects"])
+    assert any(p["entity_id"] == "proj:exampleproject" for p in result["projects"])
 
 
 def test_preference_lookup_tool(seeded_conn):
@@ -168,9 +168,9 @@ def test_decision_history_tool(seeded_conn):
 def test_knowledge_trace_tool(seeded_conn):
     """Knowledge trace returns entity and related data."""
     from knowledge_weaver.tools import knowledge_trace
-    result = knowledge_trace(seeded_conn, topic="HomeBrain")
+    result = knowledge_trace(seeded_conn, topic="ExampleProject")
     assert result["entity"] is not None
-    assert result["entity"]["entity_id"] == "proj:homebrain"
+    assert result["entity"]["entity_id"] == "proj:exampleproject"
 
 
 def test_main_unknown_subcommand(capsys):

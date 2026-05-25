@@ -23,14 +23,18 @@ from mcp.server.fastmcp import FastMCP
 # Environment configuration
 # ---------------------------------------------------------------------------
 
-DB_PATH = os.environ.get(
-    "KNOWLEDGE_WEAVER_DB_PATH",
-    "/root/.openclaw/knowledge/knowledge.db",
-)
-MEMORY_DIR = os.environ.get(
-    "KNOWLEDGE_WEAVER_MEMORY_DIR",
-    "/root/.openclaw/workspace/memory",
-)
+def _default_db_path() -> str:
+    home = os.environ.get("HOME", os.path.expanduser("~"))
+    return os.path.join(home, ".openclaw", "knowledge", "knowledge.db")
+
+
+def _default_memory_dir() -> str:
+    home = os.environ.get("HOME", os.path.expanduser("~"))
+    return os.path.join(home, ".openclaw", "workspace", "memory")
+
+
+DB_PATH = os.environ.get("KNOWLEDGE_WEAVER_DB_PATH") or _default_db_path()
+MEMORY_DIR = os.environ.get("KNOWLEDGE_WEAVER_MEMORY_DIR") or _default_memory_dir()
 LOG_LEVEL = os.environ.get(
     "KNOWLEDGE_WEAVER_LOG_LEVEL",
     "INFO",

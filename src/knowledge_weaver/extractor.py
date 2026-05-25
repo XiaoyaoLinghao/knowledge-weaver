@@ -49,13 +49,30 @@ DEFAULT_IMPORTANCE: dict[str, float] = {
     "idea": 0.3,
 }
 
-# --- Level 1: Deterministic patterns ---
+# --- Level 1: Deterministic patterns (no hardcoded names — auto-discovered from data) ---
 
-# Known project names
-_PROJECT_PATTERN = re.compile(
-    r"(HomeBrain|心连心|SpotMicro|OpenClaw|Mnemo|Knowledge\s*Weaver|KnowledgeWeaver)",
-    re.IGNORECASE,
-)
+# Project name detection patterns (language-agnostic, no user-specific names)
+# Chinese: {name}项目 e.g. "心连心项目"
+_PROJECT_CN_RE = re.compile(r"([一-鿿\w]+)项目")
+# English: CamelCase words that look like project names e.g. HomeBrain, OpenClaw
+_PROJECT_CAMEL_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
+# English: "X Project" / "X project"
+_PROJECT_EN_RE = re.compile(r"\b([A-Z][\w]+)\s+[Pp]roject\b")
+
+# Tech term detection patterns (all auto-discovered, no hardcoded keyword lists)
+# ALL_CAPS acronyms (2-8 chars): ESP32, STM32, MQTT, HA, SQL, API
+_TECH_ACRONYM_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,7})\b")
+# CamelCase tool/framework names (2+ humps): HomeAssistant, TypeScript, NodeJs
+_TECH_CAMEL_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
+# Capitalized English words in Chinese context: 使用Python开发 → Python
+# Uses lookahead/lookbehind to avoid consuming surrounding CN chars for subsequent matches
+_TECH_CN_SURROUND_RE = re.compile(r"(?<=[一-鿿，。；：、！？　])([A-Z][a-zA-Z0-9]{1,20})(?=[一-鿿，。；：、！？　])")
+# Terms with version suffixes: Python3, ESP32-S3
+_TECH_VERSION_RE = re.compile(r"\b(\w+(?:[._-]?\d+(?:\.\d+)*[a-z]*))\b")
+# Terms in backticks (code references): `nginx.conf`, `device_aggregator.py`
+_TECH_BACKTICK_RE = re.compile(r"`([a-zA-Z][\w./_-]+)`")
+# Common tech file extensions detected in context
+_TECH_EXT_RE = re.compile(r"\b([\w-]+\.(?:py|js|ts|rs|go|java|rb|sh|yaml|yml|json|toml|cfg|conf|sql|md))\b")
 
 # Items that look like DMA processing artifacts, not real knowledge
 _GARBAGE_PATTERNS = [
@@ -69,21 +86,7 @@ _GARBAGE_NAMES = {
     '"', "）", "（", "、", "。", "，",
 }
 
-_GARBAGE_NAME_MIN_LENGTH = 2  # minimum meaningful name length
-
-# Tech keywords (case-insensitive matching, output preserves original case)
-_TECH_KEYWORDS = [
-    "ESP32", "STM32", "Python", "HA", "HomeAssistant", "Docker",
-    "Nginx", "MQTT", "Zigbee", "Wi-Fi", "Bluetooth", "Linux",
-    "Rust", "Go", "Node.js", "React", "Vue", "TypeScript",
-    "JavaScript", "SQLite", "PostgreSQL", "Redis", "Git",
-    "Kubernetes", "K8s", "Terraform", "Ansible",
-]
-
-_TECH_PATTERN = re.compile(
-    r"(?<![a-zA-Z])(" + "|".join(re.escape(kw) for kw in _TECH_KEYWORDS) + r")(?![a-zA-Z])",
-    re.IGNORECASE,
-)
+_GARBAGE_NAME_MIN_LENGTH = 2
 
 # File path pattern
 _FILE_PATH_PATTERN = re.compile(
@@ -173,51 +176,118 @@ def generate_entity_id(entity_type: str, name: str) -> str:
 
 
 def extract_projects(text: str) -> list[dict]:
-    """Extract project name entities from text."""
-    results = []
-    for m in _PROJECT_PATTERN.finditer(text):
-        proj_name = m.group(0)
-        # Normalize capitalization
-        lower = proj_name.lower().replace(" ", "")
-        for original in ["HomeBrain", "OpenClaw", "SpotMicro", "Mnemo", "KnowledgeWeaver", "Knowledge Weaver"]:
-            if lower == original.lower():
-                proj_name = original
-                break
-        eid = generate_entity_id("project", proj_name)
-        results.append({
-            "id": eid,
-            "type": "project",
-            "name": proj_name,
-            "summary": text[:200],
-        })
+    """Extract project name entities from text using language-agnostic patterns.
+
+    Detects:
+    - Chinese: {name}项目 (e.g. "心连心项目" → 心连心)
+    - English: CamelCase words (e.g. HomeBrain, OpenClaw)
+    - English: "X Project" (e.g. "HomeBrain project")
+    - Backtick-quoted names: `project-name`
+    """
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    # Pattern 1: Chinese project references: {name}项目
+    for m in _PROJECT_CN_RE.finditer(text):
+        name = m.group(1).strip()
+        if name and name not in seen and not _is_garbage_name(name):
+            seen.add(name)
+            results.append(_make_entity("project", name, text))
+
+    # Pattern 2: English CamelCase (likely project names like HomeBrain, OpenClaw)
+    for m in _PROJECT_CAMEL_RE.finditer(text):
+        name = m.group(1)
+        if name not in seen and not _is_garbage_name(name) and len(name) >= 4:
+            seen.add(name)
+            results.append(_make_entity("project", name, text))
+
+    # Pattern 3: "X Project" or "X project"
+    for m in _PROJECT_EN_RE.finditer(text):
+        name = m.group(1).strip()
+        if name and name not in seen and not _is_garbage_name(name):
+            seen.add(name)
+            results.append(_make_entity("project", name, text))
+
     return results
 
 
 def extract_tech_keywords(text: str) -> list[dict]:
-    """Extract technology keyword entities from text."""
-    results = []
-    seen = set()
-    for m in _TECH_PATTERN.finditer(text):
-        # Preserve original casing from the text
-        kw = m.group(0)
-        kw_lower = kw.lower()
-        if kw_lower in seen:
-            continue
-        seen.add(kw_lower)
-        # Normalize: use canonical form from _TECH_KEYWORDS
-        canonical = kw
-        for tk in _TECH_KEYWORDS:
-            if tk.lower() == kw_lower:
-                canonical = tk
-                break
-        eid = generate_entity_id("tech", canonical)
-        results.append({
-            "id": eid,
-            "type": "tech",
-            "name": canonical,
-            "summary": f"技术栈关键词: {canonical}",
-        })
+    """Extract technology keyword entities from text using pattern-based detection.
+
+    Detects:
+    - ALL_CAPS acronyms (2-8 chars): ESP32, STM32, MQTT, HA, API, SQL
+    - CamelCase tool names: HomeAssistant, TypeScript, NodeJs
+    - Versioned terms: Python3, ESP32-S3, v2.0
+    - Backtick-quoted code references: `nginx.conf`, `device_aggregator.py`
+    - File extension references: .py, .js, .yaml, .json
+    No hardcoded keyword list — terms are auto-discovered from the content.
+    """
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    # Pattern 1: Backtick-quoted references (most reliable — explicit code mention)
+    for m in _TECH_BACKTICK_RE.finditer(text):
+        kw = m.group(1).strip()
+        _add_tech(kw, results, seen)
+
+    # Pattern 2: File extensions in context
+    for m in _TECH_EXT_RE.finditer(text):
+        kw = m.group(1).strip()
+        _add_tech(kw, results, seen)
+
+    # Pattern 3: Capitalized English words embedded in Chinese text (e.g. 使用Python开发 → Python)
+    for m in _TECH_CN_SURROUND_RE.finditer(text):
+        kw = m.group(1)
+        if len(kw) >= 2:
+            _add_tech(kw, results, seen)
+
+    # Pattern 4: ALL_CAPS acronyms
+    for m in _TECH_ACRONYM_RE.finditer(text):
+        kw = m.group(1)
+        if len(kw) >= 2:
+            _add_tech(kw, results, seen)
+
+    # Pattern 5: CamelCase tool/framework names (4+ chars to avoid noise)
+    for m in _TECH_CAMEL_RE.finditer(text):
+        kw = m.group(1)
+        if len(kw) >= 4:
+            _add_tech(kw, results, seen)
+
+    # Pattern 6: Versioned terms (at least 3 chars)
+    for m in _TECH_VERSION_RE.finditer(text):
+        kw = m.group(1)
+        if len(kw) >= 3 and any(c.isdigit() for c in kw):
+            _add_tech(kw, results, seen)
+
     return results
+
+
+def _add_tech(kw: str, results: list[dict], seen: set[str]) -> None:
+    """Add a tech keyword entity if valid and not a duplicate."""
+    kw_lower = kw.lower().rstrip(".,;:!?)")
+    if kw_lower in seen:
+        return
+    if not kw_lower or len(kw_lower) < 2:
+        return
+    if _is_garbage_name(kw):
+        return
+    # Exclude common English words that happen to match patterns
+    if kw_lower in {"the", "and", "for", "are", "was", "all", "can", "has", "had",
+                     "not", "but", "our", "you", "his", "her", "its", "who", "how",
+                     "new", "now", "one", "two", "ten", "get", "set", "put", "use"}:
+        return
+    seen.add(kw_lower)
+    results.append(_make_entity("tech", kw, f"技术栈关键词: {kw}"))
+
+
+def _make_entity(entity_type: str, name: str, summary: str) -> dict:
+    """Build a minimal entity dict for extractor output."""
+    return {
+        "id": generate_entity_id(entity_type, name),
+        "type": entity_type,
+        "name": name,
+        "summary": summary[:200],
+    }
 
 
 def extract_decisions(text: str) -> list[dict]:
@@ -384,15 +454,7 @@ def extract_entities_from_item(
             metadata=meta,
         ))
 
-    # Level 1: Project name detection (from any category)
-    for proj in extract_projects(text):
-        _add(proj["id"], "project", proj["name"], proj["summary"])
-
-    # Level 1: Tech keyword detection
-    for tech in extract_tech_keywords(text):
-        _add(tech["id"], "tech", tech["name"], tech["summary"])
-
-    # Level 2: Category-specific heuristic extraction
+    # Level 1: Category-specific heuristic extraction (takes priority)
     if entity_type == "decision":
         for d in extract_decisions(text):
             _add(d["id"], "decision", d["name"], d["summary"])
@@ -407,8 +469,15 @@ def extract_entities_from_item(
             status = t.get("status", "todo")
             _add(t["id"], "task", t["name"], t["summary"], status=status)
 
-    # If no heuristic match found, create a default entity for the item
-    if not entities:
+    # Level 2: Project name detection (from any category)
+    for proj in extract_projects(text):
+        _add(proj["id"], "project", proj["name"], proj["summary"])
+
+    # Level 3: Tech keyword detection (generic, runs after category-specific)
+    for tech in extract_tech_keywords(text):
+        _add(tech["id"], "tech", tech["name"], tech["summary"])
+
+    # If no entity found, create a default entity for the item
         name = _extract_entity_name(text, entity_type)
         eid = generate_entity_id(entity_type, name)
         _add(eid, entity_type, name, text)

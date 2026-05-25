@@ -23,7 +23,7 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
 
 def test_full_pipeline_cross_day_entity_linking(temp_db_path):
     """End-to-end: 3 days of DMA files → entities created, cross-day linked,
-    HomeBrain exists with day_count >= 1, manifest tracks 3 files."""
+    ExampleProject exists with day_count >= 1, manifest tracks 3 files."""
     result = run_consolidation(
         db_path=temp_db_path,
         memory_dir=FIXTURES,
@@ -36,11 +36,11 @@ def test_full_pipeline_cross_day_entity_linking(temp_db_path):
 
     conn = init_db(temp_db_path)
     try:
-        # HomeBrain should appear across multiple days
+        # ExampleProject should appear across multiple days
         hb = conn.execute(
-            "SELECT * FROM entities WHERE id LIKE '%homebrain%'"
+            "SELECT * FROM entities WHERE id LIKE '%exampleproject%'"
         ).fetchone()
-        assert hb is not None, "HomeBrain project entity should exist"
+        assert hb is not None, "ExampleProject project entity should exist"
         assert hb["day_count"] >= 1
 
         # Manifest should track all 3 files
@@ -86,7 +86,7 @@ def test_idempotent_consolidation(temp_db_path):
 
 
 def test_trace_after_consolidation(temp_db_path):
-    """After consolidation, knowledge_trace should return an entity with HomeBrain name."""
+    """After consolidation, knowledge_trace should return an entity with ExampleProject name."""
     run_consolidation(
         db_path=temp_db_path,
         memory_dir=FIXTURES,
@@ -95,9 +95,9 @@ def test_trace_after_consolidation(temp_db_path):
 
     conn = init_db(temp_db_path)
     try:
-        result = knowledge_trace(conn, topic="HomeBrain")
-        assert result["entity"] is not None, "knowledge_trace should find HomeBrain"
-        assert "HomeBrain" in result["entity"]["name"]
+        result = knowledge_trace(conn, topic="ExampleProject")
+        assert result["entity"] is not None, "knowledge_trace should find ExampleProject"
+        assert "ExampleProject" in result["entity"]["name"]
     finally:
         conn.close()
 
@@ -108,7 +108,7 @@ def test_trace_after_consolidation(temp_db_path):
 
 
 def test_active_projects_after_consolidation(temp_db_path):
-    """After consolidation, active_projects should list HomeBrain."""
+    """After consolidation, active_projects should list ExampleProject."""
     run_consolidation(
         db_path=temp_db_path,
         memory_dir=FIXTURES,
@@ -122,8 +122,8 @@ def test_active_projects_after_consolidation(temp_db_path):
             f"Expected at least 1 project, got {len(result['projects'])}"
         )
         names = [p["name"] for p in result["projects"]]
-        assert any("HomeBrain" in n for n in names), (
-            f"HomeBrain not found in projects: {names}"
+        assert any("ExampleProject" in n for n in names), (
+            f"ExampleProject not found in projects: {names}"
         )
     finally:
         conn.close()

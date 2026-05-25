@@ -134,13 +134,13 @@ class TestRunConsolidation:
 
         conn = init_db(temp_db_path)
 
-        # HomeBrain project should exist (appears in all 3 files)
+        # ExampleProject project should exist (appears in all 3 files)
         hb = conn.execute(
-            "SELECT * FROM entities WHERE id LIKE '%homebrain%'"
+            "SELECT * FROM entities WHERE id LIKE '%exampleproject%'"
         ).fetchone()
-        assert hb is not None, "HomeBrain project entity should exist"
+        assert hb is not None, "ExampleProject project entity should exist"
 
-        # HomeBrain should have day_count > 1 (seen across multiple days)
+        # ExampleProject should have day_count > 1 (seen across multiple days)
         assert hb["day_count"] >= 2, f"Expected day_count >= 2, got {hb['day_count']}"
 
         # Cross-day relations should exist

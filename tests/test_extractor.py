@@ -36,12 +36,12 @@ def test_generate_entity_id():
     result = generate_entity_id("decision", "设备聚合采用规则引擎优先")
     assert result.startswith("decision:")
     assert "_" not in result
-    assert "homebrain" in generate_entity_id("project", "HomeBrain")
-    assert generate_entity_id("preference", "用户偏好将功能集成在 HomeBrain 内部").startswith("pref:")
+    assert "exampleproject" in generate_entity_id("project", "ExampleProject")
+    assert generate_entity_id("preference", "用户偏好将功能集成在 ExampleProject 内部").startswith("pref:")
 
 
 def test_slugify_basic():
-    assert slugify("HomeBrain") == "homebrain"
+    assert slugify("ExampleProject") == "exampleproject"
     assert slugify("HA Entity Naming Rule") == "ha_entity_naming_rule"
     assert slugify("Docker Build Cache") == "docker_build_cache"
 
@@ -49,11 +49,11 @@ def test_slugify_basic():
 # --- extract_projects ---
 
 def test_extract_project_entity():
-    text = "HomeBrain项目需要保持聚合器稳定运行"
+    text = "ExampleProject项目需要保持聚合器稳定运行"
     results = extract_projects(text)
     assert len(results) >= 1
     names = [r["name"] for r in results]
-    assert "HomeBrain" in names
+    assert "ExampleProject" in names
     for r in results:
         assert r["type"] == "project"
 
@@ -61,7 +61,7 @@ def test_extract_project_entity():
 # --- extract_decisions ---
 
 def test_extract_decision_entity():
-    text = "决定将聚合逻辑集成到HomeBrain自身，不依赖外部脚本"
+    text = "决定将聚合逻辑集成到ExampleProject自身，不依赖外部脚本"
     results = extract_decisions(text)
     assert len(results) >= 1
     assert results[0]["type"] == "decision"
@@ -72,7 +72,7 @@ def test_extract_decision_entity():
 # --- extract_preferences ---
 
 def test_extract_preference_entity():
-    text = "用户偏好将功能集成在HomeBrain内部，而非外部脚本"
+    text = "用户偏好将功能集成在ExampleProject内部，而非外部脚本"
     results = extract_preferences(text)
     assert len(results) >= 1
     assert results[0]["type"] == "preference"
@@ -90,14 +90,14 @@ def test_extract_risk_entity():
 # --- extract_tasks ---
 
 def test_extract_task_completed():
-    text = "完成了HomeBrain设备聚合API的开发和测试"
+    text = "完成了ExampleProject设备聚合API的开发和测试"
     results = extract_tasks(text)
     assert len(results) >= 1
     assert results[0]["type"] == "task"
 
 
 def test_extract_task_todo():
-    text = "后续计划给SpotMicro增加视觉避障模块"
+    text = "后续计划给DemoRobot增加视觉避障模块"
     results = extract_tasks(text)
     assert len(results) >= 1
     assert results[0]["type"] == "task"

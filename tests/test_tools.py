@@ -60,14 +60,14 @@ def _seed_data(conn):
     entities = [
         # Projects
         {
-            "id": "proj:homebrain", "type": "project", "name": "HomeBrain",
+            "id": "proj:exampleproject", "type": "project", "name": "ExampleProject",
             "summary": "智能家居控制系统，聚合HA实体", "importance": 0.85,
             "first_seen": week_ago, "last_seen": today,
             "day_count": 5, "source_lines": '[]',
-            "metadata": '{"tags": ["homebrain", "ha"]}',
+            "metadata": '{"tags": ["exampleproject", "ha"]}',
         },
         {
-            "id": "proj:spotmicro", "type": "project", "name": "SpotMicro",
+            "id": "proj:demorobot", "type": "project", "name": "DemoRobot",
             "summary": "四足机器人项目", "importance": 0.6,
             "first_seen": long_ago, "last_seen": long_ago,
             "day_count": 1, "source_lines": '[]',
@@ -98,7 +98,7 @@ def _seed_data(conn):
         },
         {
             "id": "pref:integration", "type": "preference", "name": "集成偏好",
-            "summary": "用户偏好将功能集成在HomeBrain内部，而非外部脚本",
+            "summary": "用户偏好将功能集成在ExampleProject内部，而非外部脚本",
             "importance": 0.75, "first_seen": today, "last_seen": today,
             "day_count": 1, "source_lines": '[]',
             "metadata": '{"dma_category": "用户偏好与习惯", "domain": "coding"}',
@@ -135,8 +135,8 @@ def _seed_data(conn):
     # Relations
     relations = [
         {
-            "id": "rel:proj:homebrain->decision:rule_engine",
-            "from_entity": "proj:homebrain", "to_entity": "decision:rule_engine",
+            "id": "rel:proj:exampleproject->decision:rule_engine",
+            "from_entity": "proj:exampleproject", "to_entity": "decision:rule_engine",
             "rel_type": "RELATES_TO", "weight": 0.7,
             "evidence": "2026-05-24 co-occurrence",
         },
@@ -153,8 +153,8 @@ def _seed_data(conn):
             "evidence": "follow-up",
         },
         {
-            "id": "rel:proj:homebrain->tech:ha_naming",
-            "from_entity": "proj:homebrain", "to_entity": "tech:ha_naming",
+            "id": "rel:proj:exampleproject->tech:ha_naming",
+            "from_entity": "proj:exampleproject", "to_entity": "tech:ha_naming",
             "rel_type": "RELATES_TO", "weight": 0.6,
             "evidence": "same day",
         },
@@ -180,15 +180,15 @@ def _seed_data(conn):
 
 class TestKnowledgeSearch:
     def test_returns_correct_structure(self, conn_seeded):
-        result = knowledge_search(conn_seeded, query="HomeBrain")
+        result = knowledge_search(conn_seeded, query="ExampleProject")
         assert "results" in result
         assert "total_hits" in result
         assert isinstance(result["results"], list)
 
     def test_finds_matching_entities(self, conn_seeded):
-        result = knowledge_search(conn_seeded, query="HomeBrain")
+        result = knowledge_search(conn_seeded, query="ExampleProject")
         assert result["total_hits"] >= 1
-        assert any("HomeBrain" in r["name"] for r in result["results"])
+        assert any("ExampleProject" in r["name"] for r in result["results"])
 
     def test_result_has_required_fields(self, conn_seeded):
         result = knowledge_search(conn_seeded, query="规则引擎")
@@ -225,37 +225,37 @@ class TestKnowledgeSearch:
 
 class TestKnowledgeTrace:
     def test_returns_correct_structure(self, conn_seeded):
-        result = knowledge_trace(conn_seeded, topic="HomeBrain")
+        result = knowledge_trace(conn_seeded, topic="ExampleProject")
         assert "entity" in result
         assert "timeline" in result
         assert "related" in result
         assert "decisions" in result
 
     def test_finds_entity_by_name(self, conn_seeded):
-        result = knowledge_trace(conn_seeded, topic="HomeBrain")
+        result = knowledge_trace(conn_seeded, topic="ExampleProject")
         assert result["entity"] is not None
-        assert result["entity"]["entity_id"] == "proj:homebrain"
+        assert result["entity"]["entity_id"] == "proj:exampleproject"
 
     def test_finds_entity_by_exact_id(self, conn_seeded):
-        result = knowledge_trace(conn_seeded, topic="proj:homebrain")
+        result = knowledge_trace(conn_seeded, topic="proj:exampleproject")
         assert result["entity"] is not None
-        assert result["entity"]["entity_id"] == "proj:homebrain"
+        assert result["entity"]["entity_id"] == "proj:exampleproject"
 
     def test_related_entities_populated(self, conn_seeded):
-        result = knowledge_trace(conn_seeded, topic="HomeBrain")
-        # HomeBrain has RELATES_TO to decision:rule_engine and tech:ha_naming
+        result = knowledge_trace(conn_seeded, topic="ExampleProject")
+        # ExampleProject has RELATES_TO to decision:rule_engine and tech:ha_naming
         related_ids = [r["entity_id"] for r in result["related"]]
         assert len(related_ids) >= 1
 
     def test_timeline_has_dates(self, conn_seeded):
-        result = knowledge_trace(conn_seeded, topic="HomeBrain")
+        result = knowledge_trace(conn_seeded, topic="ExampleProject")
         for entry in result["timeline"]:
             assert "date" in entry
             assert "summary" in entry
 
     def test_decisions_collected(self, conn_seeded):
-        result = knowledge_trace(conn_seeded, topic="HomeBrain")
-        # Should include the decision:rule_engine which is related to HomeBrain
+        result = knowledge_trace(conn_seeded, topic="ExampleProject")
+        # Should include the decision:rule_engine which is related to ExampleProject
         assert isinstance(result["decisions"], list)
 
     def test_topic_not_found(self, conn_seeded):
@@ -285,13 +285,13 @@ class TestActiveProjects:
         result = active_projects(conn_seeded, lookback_days=14)
         assert len(result["projects"]) >= 1
         names = [p["name"] for p in result["projects"]]
-        assert "HomeBrain" in names
+        assert "ExampleProject" in names
 
     def test_excludes_stale_project(self, conn_seeded):
         result = active_projects(conn_seeded, lookback_days=14)
-        # SpotMicro was last seen 30 days ago, should be excluded
+        # DemoRobot was last seen 30 days ago, should be excluded
         names = [p["name"] for p in result["projects"]]
-        assert "SpotMicro" not in names
+        assert "DemoRobot" not in names
 
     def test_project_has_required_fields(self, conn_seeded):
         result = active_projects(conn_seeded, lookback_days=14)

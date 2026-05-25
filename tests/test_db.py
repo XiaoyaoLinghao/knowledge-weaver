@@ -85,12 +85,12 @@ def test_upsert_entity_updates_existing(temp_db_path):
 def test_insert_and_get_relation(temp_db_path):
     conn = init_db(temp_db_path)
 
-    insert_entity(conn, _entity("proj:homebrain", "project", "HomeBrain"))
+    insert_entity(conn, _entity("proj:exampleproject", "project", "ExampleProject"))
     insert_entity(conn, _entity("decision:rule_engine", "decision", "Rule Engine"))
 
     insert_relation(conn, {
-        "id": "rel:homebrain->rule_engine",
-        "from_entity": "proj:homebrain",
+        "id": "rel:exampleproject->rule_engine",
+        "from_entity": "proj:exampleproject",
         "to_entity": "decision:rule_engine",
         "rel_type": "RELATES_TO",
         "weight": 0.7,
@@ -98,7 +98,7 @@ def test_insert_and_get_relation(temp_db_path):
     })
 
     # Get relations from entity
-    rels = get_relations_for_entity(conn, "proj:homebrain")
+    rels = get_relations_for_entity(conn, "proj:exampleproject")
     assert len(rels) >= 1
     assert rels[0]["rel_type"] == "RELATES_TO"
 
@@ -111,14 +111,14 @@ def test_insert_and_get_relation(temp_db_path):
 def test_search_entities_fts(temp_db_path):
     conn = init_db(temp_db_path)
 
-    insert_entity(conn, _entity("proj:homebrain", "project", "HomeBrain智能家居"))
+    insert_entity(conn, _entity("proj:exampleproject", "project", "ExampleProject智能家居"))
     insert_entity(conn, _entity("fact:ha_rule", "fact", "HA命名规则"))
     insert_entity(conn, _entity("risk:cache", "risk", "Docker缓存风险"))
 
     # Search by name
-    results = search_entities_fts(conn, "HomeBrain")
+    results = search_entities_fts(conn, "ExampleProject")
     assert len(results) >= 1
-    assert any(r["id"] == "proj:homebrain" for r in results)
+    assert any(r["id"] == "proj:exampleproject" for r in results)
 
     # Search by summary (summary same as name in _entity helper)
     results2 = search_entities_fts(conn, "命名")
@@ -213,7 +213,7 @@ def test_access_log_operations(temp_db_path):
     insert_entity(conn, _entity("proj:test", "project", "Test"))
 
     log_access(conn, "proj:test", "knowledge_search", "智能家居")
-    log_access(conn, "proj:test", "knowledge_trace", "HomeBrain")
+    log_access(conn, "proj:test", "knowledge_trace", "ExampleProject")
 
     count = get_access_count(conn, "proj:test")
     assert count == 2
