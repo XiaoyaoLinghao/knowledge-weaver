@@ -1,0 +1,367 @@
+"""Consolidation pipeline — orchestrates parse → extract → link → score → embed → manifest."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+from knowledge_weaver.db import (
+    get_access_count,
+    get_entity,
+    get_manifest,
+    init_db,
+    insert_entity,
+    insert_relation,
+    upsert_manifest,
+)
+from knowledge_weaver.embedder import EmbeddingClient
+from knowledge_weaver.extractor import ExtractedEntity, extract_entities_from_section
+from knowledge_weaver.linker import (
+    ExtractedEntity as LinkerEntity,
+    LinkedRelation,
+    ParsedFile as LinkerParsedFile,
+    ParsedSection as LinkerParsedSection,
+    link_cross_day,
+    link_entities_in_file,
+    link_project_dependencies,
+)
+from knowledge_weaver.parser import ParsedFile, parse_dma_file
+from knowledge_weaver.scorer import ImportanceScorer
+
+logger = logging.getLogger(__name__)
+
+# Pattern for valid DMA daily file names: YYYY-MM-DD.md or sample_YYYY-MM-DD.md
+_DATE_FILE_RE = re.compile(r"^(?:sample_)?(\d{4}-\d{2}-\d{2})\.md$")
+
+
+@dataclass
+class ConsolidationResult:
+    """Result of a consolidation run."""
+
+    status: str = "ok"  # "ok" / "partial" / "error"
+    files_processed: int = 0
+    files_skipped: int = 0
+    files_failed: int = 0
+    entities_created: int = 0
+    entities_updated: int = 0
+    relations_created: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def compute_file_hash(filepath: str) -> str:
+    """SHA256 hash of file content."""
+    h = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def _to_linker_entity(
+    extracted: ExtractedEntity, section_title: str, parsed_date: str
+) -> LinkerEntity:
+    """Adapt extractor.ExtractedEntity → linker.ExtractedEntity."""
+    return LinkerEntity(
+        id=extracted.id,
+        type=extracted.type,
+        name=extracted.name,
+        summary=extracted.summary,
+        first_seen=parsed_date,
+        last_seen=parsed_date,
+        section_title=section_title,
+    )
+
+
+def _to_linker_parsed_file(
+    parsed: ParsedFile, source_path: str
+) -> LinkerParsedFile:
+    """Adapt parser.ParsedFile → linker.ParsedFile."""
+    sections = [
+        LinkerParsedSection(
+            title=s.title,
+            line_range=(
+                s.items[0].line_start if s.items else 0,
+                s.items[-1].line_end if s.items else 0,
+            ),
+        )
+        for s in parsed.sections
+    ]
+    return LinkerParsedFile(date=parsed.date, path=source_path, sections=sections)
+
+
+def run_consolidation(
+    db_path: str,
+    memory_dir: str,
+    embedder: EmbeddingClient | None = None,
+    today: date | None = None,
+) -> ConsolidationResult:
+    """Main consolidation pipeline.
+
+    1. Scan memory_dir for YYYY-MM-DD.md files
+    2. Check daily_manifest for already-processed unchanged files
+    3. Parse each new/changed file
+    4. Extract entities
+    5. Link cross-day entities
+    6. Score importance
+    7. Embed summaries (if embedder available)
+    8. Update daily_manifest
+    """
+    if today is None:
+        today = date.today()
+
+    result = ConsolidationResult()
+    conn = init_db(db_path)
+    scorer = ImportanceScorer()
+
+    try:
+        # Step 1: Discover candidate files
+        candidates = _discover_files(memory_dir)
+
+        # Step 2: Filter out unchanged files via manifest hash check
+        to_process, to_skip = _filter_unchanged(conn, candidates, memory_dir)
+        result.files_skipped = len(to_skip)
+
+        # Collect all existing entity IDs for cross-day linking
+        existing_ids: set[str] = {
+            row["id"]
+            for row in conn.execute("SELECT id FROM entities").fetchall()
+        }
+
+        # Process each file
+        for date_str, filename in to_process:
+            try:
+                _process_file(
+                    conn=conn,
+                    date_str=date_str,
+                    filename=filename,
+                    memory_dir=memory_dir,
+                    embedder=embedder,
+                    scorer=scorer,
+                    today=today,
+                    existing_ids=existing_ids,
+                    result=result,
+                )
+            except Exception as exc:
+                result.files_failed += 1
+                result.errors.append(f"{filename}: {exc}")
+                logger.exception("Failed to process %s", filename)
+
+        # Final status determination
+        if result.files_failed > 0:
+            if result.files_processed > 0:
+                result.status = "partial"
+            else:
+                result.status = "error"
+        else:
+            result.status = "ok"
+
+    except Exception as exc:
+        result.errors.append(str(exc))
+        result.status = "error"
+    finally:
+        conn.close()
+
+    return result
+
+
+def _discover_files(memory_dir: str) -> list[tuple[str, str]]:
+    """Find all YYYY-MM-DD.md files in memory_dir.
+
+    Returns list of (date_str, filename) sorted by date.
+    """
+    candidates: list[tuple[str, str]] = []
+    try:
+        entries = os.listdir(memory_dir)
+    except OSError:
+        return candidates
+
+    for name in entries:
+        m = _DATE_FILE_RE.match(name)
+        if m and not name.startswith("."):
+            date_str = m.group(1)  # extract date from filename
+            candidates.append((date_str, name))
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates
+
+
+def _filter_unchanged(
+    conn,
+    candidates: list[tuple[str, str]],
+    memory_dir: str,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Split candidates into (to_process, to_skip) based on manifest hash."""
+    to_process: list[tuple[str, str]] = []
+    to_skip: list[tuple[str, str]] = []
+
+    for date_str, filename in candidates:
+        filepath = os.path.join(memory_dir, filename)
+        file_hash = compute_file_hash(filepath)
+        manifest = get_manifest(conn, date_str)
+
+        if manifest and manifest["file_hash"] == file_hash:
+            to_skip.append((date_str, filename))
+        else:
+            to_process.append((date_str, filename))
+
+    return to_process, to_skip
+
+
+def _process_file(
+    conn,
+    date_str: str,
+    filename: str,
+    memory_dir: str,
+    embedder: EmbeddingClient | None,
+    scorer: ImportanceScorer,
+    today: date,
+    existing_ids: set[str],
+    result: ConsolidationResult,
+) -> None:
+    """Process a single DMA file through the full pipeline."""
+    filepath = os.path.join(memory_dir, filename)
+    file_hash = compute_file_hash(filepath)
+
+    # Step 3: Parse
+    parsed = parse_dma_file(filepath)
+    if not parsed.sections:
+        # Empty file or parse failure — still record manifest
+        upsert_manifest(conn, {
+            "date": date_str,
+            "file_path": filepath,
+            "file_hash": file_hash,
+            "entity_count": 0,
+            "status": "ok",
+        })
+        result.files_processed += 1
+        return
+
+    # Step 4: Extract entities from all sections
+    all_extracted: list[ExtractedEntity] = []
+    # Map entity_id → section_title (for linker adaptation)
+    entity_section_map: dict[str, str] = {}
+
+    relative_path = f"memory/{filename}"
+    for section in parsed.sections:
+        section_entities = extract_entities_from_section(section, relative_path)
+        for ent in section_entities:
+            if ent.id not in {e.id for e in all_extracted}:
+                all_extracted.append(ent)
+                entity_section_map[ent.id] = section.title
+
+    # Step 6 & 7: Score and upsert entities + embed (before linking,
+    # because link_cross_day also inserts entities)
+    entity_count = 0
+    texts_to_embed: list[str] = []
+    entity_ids_to_embed: list[str] = []
+
+    for extracted in all_extracted:
+        # Build entity dict for DB
+        db_entity = get_entity(conn, extracted.id)
+        if db_entity is not None:
+            # Entity exists — update
+            new_day_count = db_entity["day_count"] + 1
+            first_seen = min(db_entity["first_seen"], date_str)
+            result.entities_updated += 1
+        else:
+            new_day_count = 1
+            first_seen = date_str
+            result.entities_created += 1
+
+        # Compute importance score
+        try:
+            last_seen_date = date.fromisoformat(date_str)
+            days_since = max(0, (today - last_seen_date).days)
+        except ValueError:
+            days_since = 0
+
+        # Count categories from metadata
+        meta = extracted.metadata if isinstance(extracted.metadata, dict) else {}
+        tags = meta.get("tags", [])
+        tag_count = len(tags) if isinstance(tags, list) else 0
+        access_count = get_access_count(conn, extracted.id) if db_entity else 0
+
+        importance = scorer.calculate(
+            days_since_last_seen=days_since,
+            day_count=new_day_count,
+            distinct_categories=1,  # one category per extraction
+            tag_count=tag_count,
+            access_count=access_count,
+        )
+
+        entity_dict = {
+            "id": extracted.id,
+            "type": extracted.type,
+            "name": extracted.name,
+            "summary": extracted.summary,
+            "importance": importance,
+            "first_seen": first_seen,
+            "last_seen": date_str,
+            "day_count": new_day_count,
+            "source_lines": extracted.source_lines,
+            "metadata": json.dumps(extracted.metadata, ensure_ascii=False),
+        }
+        insert_entity(conn, entity_dict)
+        existing_ids.add(extracted.id)
+        entity_count += 1
+
+        # Collect for batch embedding
+        if embedder is not None and extracted.summary:
+            texts_to_embed.append(extracted.summary[:500])
+            entity_ids_to_embed.append(extracted.id)
+
+    # Step 5: Link — within-file co-occurrence
+    linker_entities = [
+        _to_linker_entity(e, entity_section_map.get(e.id, ""), date_str)
+        for e in all_extracted
+    ]
+    linker_parsed = _to_linker_parsed_file(parsed, filepath)
+
+    in_file_relations = link_entities_in_file(
+        conn, linker_entities, linker_parsed, filepath
+    )
+    result.relations_created += len(in_file_relations)
+
+    # Step 5b: Cross-day linking
+    cross_day_relations = link_cross_day(conn, linker_entities, existing_ids)
+    result.relations_created += len(cross_day_relations)
+
+    # Step 5c: Project dependencies
+    proj_relations = link_project_dependencies(conn, linker_entities)
+    result.relations_created += len(proj_relations)
+
+    # Step 7b: Batch embed and store vectors
+    if embedder is not None and texts_to_embed:
+        try:
+            vectors = embedder.embed_batch(texts_to_embed)
+            for eid, vec in zip(entity_ids_to_embed, vectors):
+                if vec:  # skip empty results
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO entity_vectors(entity_id, embedding) VALUES (?, ?)",
+                            (eid, json.dumps(vec)),
+                        )
+                    except Exception:
+                        pass  # vector table may not exist
+            conn.commit()
+        except Exception as exc:
+            logger.warning("Embedding failed for %s: %s", filename, exc)
+
+    # Step 8: Update manifest
+    upsert_manifest(conn, {
+        "date": date_str,
+        "file_path": filepath,
+        "file_hash": file_hash,
+        "entity_count": entity_count,
+        "status": "ok",
+    })
+    result.files_processed += 1

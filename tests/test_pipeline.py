@@ -1,0 +1,226 @@
+"""Tests for the consolidation pipeline module."""
+
+import os
+import tempfile
+
+import pytest
+
+from knowledge_weaver.db import get_entity, get_manifest, init_db
+from knowledge_weaver.pipeline import ConsolidationResult, compute_file_hash, run_consolidation
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+
+
+class MockEmbedder:
+    """Mock embedder that returns fixed vectors for testing."""
+
+    def embed(self, text: str) -> list[float]:
+        return [0.1] * 768
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1] * 768 for _ in texts]
+
+    def close(self):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# compute_file_hash
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFileHash:
+    def test_hash_consistency(self, tmp_path):
+        f = tmp_path / "test.md"
+        f.write_text("hello world", encoding="utf-8")
+        h1 = compute_file_hash(str(f))
+        h2 = compute_file_hash(str(f))
+        assert h1 == h2
+        assert len(h1) == 64  # SHA256 hex
+
+    def test_hash_changes_with_content(self, tmp_path):
+        f = tmp_path / "test.md"
+        f.write_text("content A", encoding="utf-8")
+        h1 = compute_file_hash(str(f))
+        f.write_text("content B", encoding="utf-8")
+        h2 = compute_file_hash(str(f))
+        assert h1 != h2
+
+    def test_hash_nonexistent_file(self):
+        h = compute_file_hash("/nonexistent/path.md")
+        assert h == ""
+
+
+# ---------------------------------------------------------------------------
+# run_consolidation — basic
+# ---------------------------------------------------------------------------
+
+
+class TestRunConsolidation:
+    def test_run_consolidation(self, temp_db_path):
+        """Run on sample fixtures, verify entities created."""
+        result = run_consolidation(
+            db_path=temp_db_path,
+            memory_dir=FIXTURES,
+            embedder=MockEmbedder(),
+        )
+        assert result.files_processed >= 1
+        assert result.entities_created > 0
+        assert result.status == "ok"
+        assert result.errors == []
+
+        # Verify entities exist in DB
+        conn = init_db(temp_db_path)
+        rows = conn.execute("SELECT COUNT(*) as cnt FROM entities").fetchone()
+        assert rows["cnt"] > 0
+        conn.close()
+
+    def test_consolidation_skips_unchanged(self, temp_db_path):
+        """Second run should skip processed files (idempotent)."""
+        embedder = MockEmbedder()
+
+        # First run
+        result1 = run_consolidation(temp_db_path, FIXTURES, embedder)
+        assert result1.files_processed >= 1
+        first_created = result1.entities_created
+
+        # Second run — same files, should skip
+        result2 = run_consolidation(temp_db_path, FIXTURES, embedder)
+        assert result2.files_skipped >= result1.files_processed
+        assert result2.files_processed == 0
+        assert result2.entities_created == 0
+
+    def test_consolidation_detects_changed(self, temp_db_path, tmp_path):
+        """Modified file should be re-processed."""
+        # Create a single test file
+        test_file = tmp_path / "2026-05-20.md"
+        test_file.write_text(
+            "---\ntitle: test\ndate: 2026-05-20\n---\n\n## 核心要点\n- 测试实体A\n",
+            encoding="utf-8",
+        )
+
+        # First run
+        result1 = run_consolidation(temp_db_path, str(tmp_path), MockEmbedder())
+        assert result1.files_processed == 1
+
+        # Modify file
+        test_file.write_text(
+            "---\ntitle: test\ndate: 2026-05-20\n---\n\n## 核心要点\n- 测试实体A修改版\n",
+            encoding="utf-8",
+        )
+
+        # Second run — should detect change
+        result2 = run_consolidation(temp_db_path, str(tmp_path), MockEmbedder())
+        assert result2.files_processed == 1
+        assert result2.files_skipped == 0
+
+    def test_consolidation_empty_dir(self, temp_db_path):
+        """No md files → empty result."""
+        with tempfile.TemporaryDirectory() as empty_dir:
+            result = run_consolidation(temp_db_path, empty_dir, MockEmbedder())
+            assert result.files_processed == 0
+            assert result.files_skipped == 0
+            assert result.entities_created == 0
+            assert result.status == "ok"
+
+    def test_consolidation_multiple_files(self, temp_db_path):
+        """Process 3 sample files, verify cross-day linking."""
+        result = run_consolidation(temp_db_path, FIXTURES, MockEmbedder())
+
+        assert result.files_processed == 3
+        assert result.entities_created > 0
+        assert result.relations_created > 0
+        assert result.status == "ok"
+
+        conn = init_db(temp_db_path)
+
+        # HomeBrain project should exist (appears in all 3 files)
+        hb = conn.execute(
+            "SELECT * FROM entities WHERE id LIKE '%homebrain%'"
+        ).fetchone()
+        assert hb is not None, "HomeBrain project entity should exist"
+
+        # HomeBrain should have day_count > 1 (seen across multiple days)
+        assert hb["day_count"] >= 2, f"Expected day_count >= 2, got {hb['day_count']}"
+
+        # Cross-day relations should exist
+        relations = conn.execute(
+            "SELECT COUNT(*) as cnt FROM relations"
+        ).fetchone()
+        assert relations["cnt"] > 0
+
+        # All 3 manifest entries should exist
+        manifest_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM daily_manifest"
+        ).fetchone()
+        assert manifest_count["cnt"] == 3
+
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidationEdgeCases:
+    def test_no_embedder(self, temp_db_path):
+        """Pipeline works without an embedder (embeddings skipped)."""
+        result = run_consolidation(
+            db_path=temp_db_path,
+            memory_dir=FIXTURES,
+            embedder=None,
+        )
+        assert result.files_processed >= 1
+        assert result.entities_created > 0
+        assert result.status == "ok"
+
+    def test_manifest_updated_after_run(self, temp_db_path):
+        """Daily manifest is properly recorded."""
+        run_consolidation(temp_db_path, FIXTURES, MockEmbedder())
+
+        conn = init_db(temp_db_path)
+        manifest = get_manifest(conn, "2026-05-24")
+        assert manifest is not None
+        assert manifest["file_hash"] != ""
+        assert manifest["entity_count"] > 0
+        assert manifest["status"] == "ok"
+        conn.close()
+
+    def test_importance_scored(self, temp_db_path):
+        """Entities should have non-zero importance scores."""
+        run_consolidation(temp_db_path, FIXTURES, MockEmbedder())
+
+        conn = init_db(temp_db_path)
+        rows = conn.execute(
+            "SELECT id, importance FROM entities WHERE importance > 0 LIMIT 5"
+        ).fetchall()
+        assert len(rows) > 0, "At least some entities should have non-zero importance"
+        for row in rows:
+            assert 0.0 <= row["importance"] <= 1.0
+        conn.close()
+
+    def test_non_date_files_ignored(self, temp_db_path, tmp_path):
+        """Files not matching YYYY-MM-DD.md should be ignored."""
+        # Create a valid file and an invalid file
+        (tmp_path / "2026-05-20.md").write_text(
+            "---\ntitle: test\ndate: 2026-05-20\n---\n\n## 核心要点\n- 测试\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "notes.md").write_text("random notes", encoding="utf-8")
+        (tmp_path / ".hidden.md").write_text("hidden", encoding="utf-8")
+
+        result = run_consolidation(temp_db_path, str(tmp_path), MockEmbedder())
+        assert result.files_processed == 1
+
+    def test_consolidation_result_dataclass(self):
+        """ConsolidationResult defaults are correct."""
+        r = ConsolidationResult()
+        assert r.status == "ok"
+        assert r.files_processed == 0
+        assert r.files_skipped == 0
+        assert r.files_failed == 0
+        assert r.entities_created == 0
+        assert r.entities_updated == 0
+        assert r.relations_created == 0
+        assert r.errors == []
