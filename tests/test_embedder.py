@@ -201,7 +201,8 @@ class TestEmbedBatch:
         )
         results = client.embed_batch(["text1", "text2"])
 
-        assert results == []
+        # On error, each input gets an empty embedding vector
+        assert results == [[], []]
 
 
 class TestEmbedDimension:
