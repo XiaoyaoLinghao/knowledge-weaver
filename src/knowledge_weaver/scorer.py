@@ -39,7 +39,7 @@ class ImportanceScorer:
         """Calculate composite importance score."""
         score = (
             self.WEIGHTS["freshness"] * self.freshness(days_since_last_seen)
-            + self.WEIGHTS["frequency"] * self.frequency(day_count)
+            + self.WEIGHTS["frequency"] * self.frequency(day_count, days_since_last_seen)
             + self.WEIGHTS["diversity"] * self.diversity(distinct_categories)
             + self.WEIGHTS["richness"] * self.richness(tag_count)
             + self.WEIGHTS["access"] * self.access(access_count)
@@ -51,11 +51,19 @@ class ImportanceScorer:
         """max(0, 1 - days_since_last_seen / 30)"""
         return max(0.0, 1.0 - days_since_last_seen / 30.0)
 
-    def frequency(self, day_count: int) -> float:
-        """log(1 + day_count) / log(8)"""
+    def frequency(self, day_count: int, days_since_last_seen: int = 0) -> float:
+        """log(1 + day_count) / log(8), with recency decay for stale entities.
+
+        Entities not seen in >30 days get a decay multiplier — this prevents
+        historically hot but now irrelevant entities from permanently dominating.
+        """
         if day_count <= 0:
             return 0.0
-        return math.log(1 + day_count) / math.log(8)
+        base = math.log(1 + day_count) / math.log(8)
+        if days_since_last_seen > 30:
+            decay = max(0.3, 1.0 - (days_since_last_seen - 30) / 90.0)
+            base *= decay
+        return base
 
     def diversity(self, distinct_categories: int) -> float:
         """min(1, distinct_categories / 4)"""

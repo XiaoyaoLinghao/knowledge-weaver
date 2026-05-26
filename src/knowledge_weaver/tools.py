@@ -8,6 +8,7 @@ and returns a dict suitable for MCP JSON response.
 from __future__ import annotations
 
 import datetime
+import difflib
 import json
 import logging
 import os
@@ -164,12 +165,15 @@ def knowledge_search(
             for r in related_rels[:5]
         ]
 
-        # Calculate a combined "similarity_score" (importance as proxy when no embedding)
+        # Calculate a combined "similarity_score" using fuzzy name matching
         importance = entity.get("importance", 0.0)
-        # Use a simple text-match boost for similarity
-        text_match = query.lower() in (entity.get("name", "") + entity.get("summary", "")).lower()
-        similarity_score = importance * (1.2 if text_match else 1.0)
-        similarity_score = min(1.0, similarity_score)
+        name = entity.get("name", "") or ""
+        summary = entity.get("summary", "") or ""
+        query_lower = query.lower()
+        name_ratio = difflib.SequenceMatcher(None, query_lower, name.lower()).ratio()
+        summary_hit = 1.0 if query_lower in summary.lower() else 0.0
+        similarity_score = importance * 0.5 + name_ratio * 0.3 + summary_hit * 0.2
+        similarity_score = round(min(1.0, similarity_score), 4)
 
         results.append({
             "entity_id": eid,
@@ -500,12 +504,51 @@ def knowledge_stats(conn) -> dict:
     except Exception:
         pass
 
+    # --- Quality metrics ---
+
+    # Relation type distribution
+    rel_types = conn.execute(
+        "SELECT rel_type, COUNT(*) as cnt FROM relations GROUP BY rel_type ORDER BY cnt DESC"
+    ).fetchall()
+    relation_type_counts = {r["rel_type"]: r["cnt"] for r in rel_types}
+
+    # Orphan entities (no relations at all)
+    orphan_row = conn.execute("""
+        SELECT COUNT(*) as cnt FROM entities e
+        WHERE NOT EXISTS (SELECT 1 FROM relations r WHERE r.from_entity=e.id OR r.to_entity=e.id)
+    """).fetchone()
+    orphan_count = orphan_row["cnt"] if orphan_row else 0
+
+    # Relation density (avg relations per entity)
+    avg_relations = round(total_relations / total_entities, 2) if total_entities else 0.0
+
+    # Importance score distribution (quartiles)
+    scores = [r[0] for r in conn.execute(
+        "SELECT importance FROM entities ORDER BY importance"
+    ).fetchall()]
+    score_quartiles = {}
+    if scores:
+        n = len(scores)
+        score_quartiles = {
+            "min": round(scores[0], 4),
+            "p25": round(scores[n // 4], 4),
+            "p50": round(scores[n // 2], 4),
+            "p75": round(scores[3 * n // 4], 4),
+            "max": round(scores[-1], 4),
+            "distinct_values": len(set(round(s, 4) for s in scores)),
+        }
+
     return {
         "entity_counts": entity_counts,
         "total_entities": total_entities,
         "total_relations": total_relations,
+        "relation_type_counts": relation_type_counts,
         "indexed_days": indexed_days,
         "last_consolidation": last_consolidation,
         "embedding_model": "",
         "db_size_mb": db_size_mb,
+        # Quality metrics
+        "orphan_entities": orphan_count,
+        "avg_relations_per_entity": avg_relations,
+        "importance_distribution": score_quartiles,
     }

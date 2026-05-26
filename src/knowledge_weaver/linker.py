@@ -157,6 +157,10 @@ def link_entities_in_file(
             if len(relations) >= MAX_PER_FILE_RELATIONS:
                 break
 
+    # CONTRADICTS detection between opposing decisions
+    contradict_relations = link_contradicts_in_file(conn, entities)
+    relations.extend(contradict_relations)
+
     return relations
 
 
@@ -198,6 +202,29 @@ def link_cross_day(
 
         if db_entity is not None:
             new_day_count = db_entity["day_count"] + 1
+
+            # REFINES: new summary is >50% longer — the understanding deepened
+            old_summary_len = len(db_entity["summary"] or "")
+            new_summary_len = len(entity.summary or "")
+            if new_summary_len > old_summary_len * 1.5:
+                refines_rel = LinkedRelation(
+                    id=generate_relation_id(entity.id, entity.id, "REFINES"),
+                    from_entity=entity.id,
+                    to_entity=entity.id,
+                    rel_type="REFINES",
+                    weight=0.8,
+                    evidence=f"summary_expanded:{old_summary_len}→{new_summary_len}",
+                )
+                insert_relation(conn, {
+                    "id": refines_rel.id,
+                    "from_entity": refines_rel.from_entity,
+                    "to_entity": refines_rel.to_entity,
+                    "rel_type": refines_rel.rel_type,
+                    "weight": refines_rel.weight,
+                    "evidence": refines_rel.evidence,
+                })
+                relations.append(refines_rel)
+
             conn.execute(
                 "UPDATE entities SET day_count=?, last_seen=?, updated_at=datetime('now') WHERE id=?",
                 (new_day_count, entity.last_seen, entity.id),
@@ -273,4 +300,55 @@ def link_project_dependencies(
                 })
                 relations.append(rel)
 
+    return relations
+
+
+# Opposing stance keywords for CONTRADICTS detection
+_CONTRADICT_PAIRS: list[tuple[set[str], set[str]]] = [
+    ({"采用", "选择", "决定使用", "改用"}, {"放弃", "排除", "不采用", "弃用"}),
+    ({"增加", "新增", "添加", "引入"}, {"移除", "删除", "去掉", "废弃"}),
+    ({"升级", "更新到", "迁移到"}, {"回退", "降级", "回滚到"}),
+]
+
+
+def link_contradicts_in_file(
+    conn,
+    entities: list[ExtractedEntity],
+) -> list[LinkedRelation]:
+    """Detect CONTRADICTS relations between opposing decision entities.
+
+    Two decisions are flagged as conflicting if their summaries contain
+    opposing stance keywords (e.g. "采用X" vs "放弃X") and they share
+    at least 1 non-stopword.
+    """
+    relations: list[LinkedRelation] = []
+    decisions = [e for e in entities if e.type == "decision"]
+    if len(decisions) < 2:
+        return relations
+
+    for i in range(len(decisions)):
+        for j in range(i + 1, len(decisions)):
+            d1, d2 = decisions[i], decisions[j]
+            s1, s2 = d1.summary.lower(), d2.summary.lower()
+            for pos_set, neg_set in _CONTRADICT_PAIRS:
+                pos_in_s1 = any(kw in s1 for kw in pos_set)
+                neg_in_s1 = any(kw in s1 for kw in neg_set)
+                pos_in_s2 = any(kw in s2 for kw in pos_set)
+                neg_in_s2 = any(kw in s2 for kw in neg_set)
+                if (pos_in_s1 and neg_in_s2) or (neg_in_s1 and pos_in_s2):
+                    shared = _shared_non_stopwords(d1, d2, min_shared=1)
+                    if shared:
+                        rel = LinkedRelation(
+                            id=generate_relation_id(d1.id, d2.id, "CONTRADICTS"),
+                            from_entity=d1.id, to_entity=d2.id,
+                            rel_type="CONTRADICTS", weight=0.7,
+                            evidence=f"opposing_stance: {','.join(shared[:3])}",
+                        )
+                        insert_relation(conn, {
+                            "id": rel.id, "from_entity": rel.from_entity,
+                            "to_entity": rel.to_entity, "rel_type": rel.rel_type,
+                            "weight": rel.weight, "evidence": rel.evidence,
+                        })
+                        relations.append(rel)
+                        break
     return relations

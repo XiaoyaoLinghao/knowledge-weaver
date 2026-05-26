@@ -9,6 +9,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from knowledge_weaver.db import (
@@ -216,6 +217,27 @@ def _filter_unchanged(
     return to_process, to_skip
 
 
+def _find_similar_entity(conn, entity_type: str, name: str, threshold: float = 0.85) -> str | None:
+    """Find an existing same-type entity with a highly similar name.
+
+    Returns the existing entity ID if found, None otherwise.
+    Only compares against entities first seen within the last 30 days to
+    keep the comparison set manageable.
+    """
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=30)).isoformat()
+    rows = conn.execute(
+        "SELECT id, name FROM entities WHERE type=? AND first_seen >= ?",
+        (entity_type, cutoff),
+    ).fetchall()
+    best_id, best_ratio = None, 0.0
+    for row in rows:
+        ratio = SequenceMatcher(None, name.lower(), row["name"].lower()).ratio()
+        if ratio > best_ratio:
+            best_ratio, best_id = ratio, row["id"]
+    return best_id if best_ratio >= threshold else None
+
+
 def _process_file(
     conn,
     date_str: str,
@@ -278,9 +300,28 @@ def _process_file(
             first_seen = min(db_entity["first_seen"], date_str)
             result.entities_updated += 1
         else:
-            new_day_count = 1
-            first_seen = date_str
-            result.entities_created += 1
+            # Cross-day name similarity merge: if a same-type entity exists
+            # with a highly similar name, merge into it instead of creating new.
+            merged_id = _find_similar_entity(conn, extracted.type, extracted.name)
+            if merged_id:
+                logger.debug("Merging %s → %s (name similarity)", extracted.id, merged_id)
+                extracted = ExtractedEntity(
+                    id=merged_id,
+                    type=extracted.type,
+                    name=extracted.name,
+                    summary=extracted.summary,
+                    source_lines=extracted.source_lines,
+                    metadata=extracted.metadata,
+                )
+                db_entity = get_entity(conn, merged_id)
+            if db_entity is not None:
+                new_day_count = db_entity["day_count"] + 1
+                first_seen = min(db_entity["first_seen"], date_str)
+                result.entities_updated += 1
+            else:
+                new_day_count = 1
+                first_seen = date_str
+                result.entities_created += 1
 
         # Compute importance score
         try:

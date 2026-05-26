@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""Clean noise data from the knowledge base and recalculate entity importance scores.
+"""Clean noisy entities and rescore importance for Knowledge Weaver DB."""
 
-Steps:
-  A — Remove noise entities (timestamps, common tech words, structural markers)
-      along with their relations and vectors.
-  B — Remove weak RELATES_TO relations with DMA-category evidence.
-  C — Full rescore of all remaining entities via score_entity().
-  D — Print before/after statistics.
-"""
+from __future__ import annotations
 
 import argparse
-import json
 import os
-import sys
+import re
 import sqlite3
+import sys
+from collections import Counter
 from datetime import date
 
+# Allow imports from project src
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from knowledge_weaver.scorer import score_entity
@@ -25,8 +21,8 @@ from knowledge_weaver.extractor import (
     _STRUCTURAL_TECH_RE,
 )
 
-# DMA category names used as evidence — these are section headers, not real signals
-WEAK_EVIDENCE = [
+# Weak RELATES_TO evidences derived from DMA category names
+_WEAK_RELATES_TO_EVIDENCES = (
     "核心要点",
     "决策与结论",
     "已完成事项",
@@ -35,238 +31,264 @@ WEAK_EVIDENCE = [
     "技术/项目要点",
     "风险与注意事项",
     "创意与想法",
-]
+)
 
 
-def get_stats(conn: sqlite3.Connection) -> dict:
+def _get_stats(conn: sqlite3.Connection) -> dict:
     """Collect current database statistics."""
-    total = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-    by_type = dict(
-        conn.execute("SELECT type, COUNT(*) FROM entities GROUP BY type").fetchall()
-    )
-    relations = conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
-    vectors = conn.execute("SELECT COUNT(*) FROM entity_vectors").fetchone()[0]
-    return {
-        "total_entities": total,
-        "by_type": by_type,
-        "total_relations": relations,
-        "total_vectors": vectors,
+    stats: dict = {}
+
+    # Total entity count
+    stats["total_entities"] = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+
+    # Entity count by type
+    rows = conn.execute("SELECT type, COUNT(*) FROM entities GROUP BY type").fetchall()
+    stats["entities_by_type"] = dict(rows)
+
+    # Total relations
+    stats["total_relations"] = conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+
+    # Total vectors
+    try:
+        stats["total_vectors"] = conn.execute("SELECT COUNT(*) FROM entity_vectors").fetchone()[0]
+    except sqlite3.OperationalError:
+        stats["total_vectors"] = 0
+
+    return stats
+
+
+def _print_stats(label: str, stats: dict) -> None:
+    """Print database statistics."""
+    print(f"\n{'=' * 60}")
+    print(f"  {label}")
+    print(f"{'=' * 60}")
+    print(f"  Total entities:  {stats['total_entities']}")
+    print(f"  By type:")
+    for etype, count in sorted(stats["entities_by_type"].items()):
+        print(f"    {etype}: {count}")
+    print(f"  Total relations: {stats['total_relations']}")
+    print(f"  Total vectors:   {stats['total_vectors']}")
+
+
+def _find_noisy_entity_ids(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Find IDs of noisy entities grouped by reason."""
+    noisy: dict[str, list[str]] = {
+        "timestamp_fact": [],
+        "common_tech": [],
+        "structural_tech": [],
     }
 
-
-def print_stats(label: str, s: dict) -> None:
-    """Print formatted statistics."""
-    print(f"\n{label}:")
-    print(f"  Total entities:   {s['total_entities']}")
-    for etype in sorted(s["by_type"]):
-        print(f"    {etype}: {s['by_type'][etype]}")
-    print(f"  Total relations:   {s['total_relations']}")
-    print(f"  Total vectors:     {s['total_vectors']}")
-
-
-# ---------------------------------------------------------------------------
-# Step A — Collect and delete noise entities
-# ---------------------------------------------------------------------------
-
-
-def collect_noise_ids(conn: sqlite3.Connection) -> set[str]:
-    """Collect IDs of noise entities to remove.
-
-    A1 — Timestamp-log fact entities (Python-side regex).
-    A2 — Common tech words (parameterized SQL IN query).
-    A3 — Structural marker tech entities (Python-side regex).
-    """
-    noise: set[str] = set()
-
-    # A1 — timestamp facts
-    for row in conn.execute("SELECT id, name FROM entities WHERE type = 'fact'"):
-        if _TIMESTAMP_LOG_RE.match(row["name"]):
-            noise.add(row["id"])
-
-    # A2 — common tech words
-    if _TECH_COMMON_WORDS:
-        ph = ",".join(["?"] * len(_TECH_COMMON_WORDS))
-        upper_words = tuple(w.upper() for w in _TECH_COMMON_WORDS)
-        for row in conn.execute(
-            f"SELECT id FROM entities WHERE type = 'tech' AND UPPER(name) IN ({ph})",
-            upper_words,
-        ):
-            noise.add(row["id"])
-
-    # A3 — structural marker tech entities
-    for row in conn.execute("SELECT id, name FROM entities WHERE type = 'tech'"):
-        if _STRUCTURAL_TECH_RE.match(row["name"]):
-            noise.add(row["id"])
-
-    return noise
-
-
-def delete_noise(conn: sqlite3.Connection, noise_ids: set[str]) -> tuple[int, int]:
-    """Delete noise entities, relations, and vectors in the correct order.
-
-    SQLite PRAGMA foreign_keys defaults to OFF, so we must delete manually:
-      1. relations referencing noise entities
-      2. entity_vectors for noise entities
-      3. the noise entities themselves
-    """
-    if not noise_ids:
-        return 0, 0
-
-    ph = ",".join(["?"] * len(noise_ids))
-    ids = tuple(noise_ids)
-
-    # 1 — relations
-    cur = conn.execute(
-        f"DELETE FROM relations WHERE from_entity IN ({ph}) OR to_entity IN ({ph})",
-        ids + ids,
-    )
-    rels_deleted = cur.rowcount
-
-    # 2 — entity_vectors
-    conn.execute(f"DELETE FROM entity_vectors WHERE entity_id IN ({ph})", ids)
-
-    # 3 — entities
-    cur = conn.execute(f"DELETE FROM entities WHERE id IN ({ph})", ids)
-    ents_deleted = cur.rowcount
-
-    conn.commit()
-    return ents_deleted, rels_deleted
-
-
-# ---------------------------------------------------------------------------
-# Step B — Clean weak RELATES_TO relations
-# ---------------------------------------------------------------------------
-
-
-def clean_weak_relations(conn: sqlite3.Connection) -> int:
-    """Remove RELATES_TO relations whose evidence is a DMA category name."""
-    if not WEAK_EVIDENCE:
-        return 0
-    ph = ",".join(["?"] * len(WEAK_EVIDENCE))
-    cur = conn.execute(
-        f"DELETE FROM relations WHERE rel_type = 'RELATES_TO' AND evidence IN ({ph})",
-        tuple(WEAK_EVIDENCE),
-    )
-    conn.commit()
-    return cur.rowcount
-
-
-# ---------------------------------------------------------------------------
-# Step C — Full rescore of remaining entities
-# ---------------------------------------------------------------------------
-
-
-def rescore_all(conn: sqlite3.Connection) -> int:
-    """Recalculate importance for every remaining entity using score_entity()."""
-    access_map: dict[str, int] = {}
-    for row in conn.execute(
-        "SELECT entity_id, COUNT(*) AS cnt FROM access_log GROUP BY entity_id"
-    ):
-        access_map[row["entity_id"]] = row["cnt"]
-
-    today = date.today()
-    rows = conn.execute("SELECT * FROM entities").fetchall()
-    updated = 0
-
+    # Step A1: Timestamp fact entities
+    rows = conn.execute("SELECT id, name FROM entities WHERE type = 'fact'").fetchall()
     for row in rows:
-        entity = dict(row)
-        # Populate fields that score_entity expects from metadata JSON
+        if _TIMESTAMP_LOG_RE.match(row["name"]):
+            noisy["timestamp_fact"].append(row["id"])
+
+    # Step A2: Common tech word entities
+    common_words_upper = [w.upper() for w in _TECH_COMMON_WORDS]
+    if common_words_upper:
+        placeholders = ",".join("?" * len(common_words_upper))
+        rows = conn.execute(
+            f"SELECT id FROM entities WHERE type = 'tech' AND UPPER(name) IN ({placeholders})",
+            common_words_upper,
+        ).fetchall()
+        noisy["common_tech"] = [row["id"] for row in rows]
+
+    # Step A3: Structural tech entities
+    rows = conn.execute("SELECT id, name FROM entities WHERE type = 'tech'").fetchall()
+    for row in rows:
+        if _STRUCTURAL_TECH_RE.match(row["name"]):
+            noisy["structural_tech"].append(row["id"])
+
+    return noisy
+
+
+def _delete_entities_cascade(conn: sqlite3.Connection, entity_ids: list[str]) -> int:
+    """Delete entities and their related data in correct order. Returns deleted relation count."""
+    if not entity_ids:
+        return 0
+
+    placeholders = ",".join("?" * len(entity_ids))
+
+    # Delete relations referencing these entities
+    rel_count = conn.execute(
+        f"SELECT COUNT(*) FROM relations WHERE from_entity IN ({placeholders}) OR to_entity IN ({placeholders})",
+        entity_ids + entity_ids,
+    ).fetchone()[0]
+    conn.execute(
+        f"DELETE FROM relations WHERE from_entity IN ({placeholders}) OR to_entity IN ({placeholders})",
+        entity_ids + entity_ids,
+    )
+
+    # Delete entity vectors
+    try:
+        conn.execute(
+            f"DELETE FROM entity_vectors WHERE entity_id IN ({placeholders})",
+            entity_ids,
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # Delete entities
+    conn.execute(
+        f"DELETE FROM entities WHERE id IN ({placeholders})",
+        entity_ids,
+    )
+
+    return rel_count
+
+
+def _delete_weak_relates_to(conn: sqlite3.Connection) -> int:
+    """Delete weak RELATES_TO relations. Returns deleted count."""
+    placeholders = ",".join("?" * len(_WEAK_RELATES_TO_EVIDENCES))
+    count = conn.execute(
+        f"SELECT COUNT(*) FROM relations WHERE rel_type = 'RELATES_TO' AND evidence IN ({placeholders})",
+        list(_WEAK_RELATES_TO_EVIDENCES),
+    ).fetchone()[0]
+    conn.execute(
+        f"DELETE FROM relations WHERE rel_type = 'RELATES_TO' AND evidence IN ({placeholders})",
+        list(_WEAK_RELATES_TO_EVIDENCES),
+    )
+    return count
+
+
+def _rescore_entities(conn: sqlite3.Connection) -> int:
+    """Rescore all remaining entities. Returns count of rescored entities."""
+    # Build access count map
+    access_counts: dict[str, int] = {}
+    try:
+        rows = conn.execute(
+            "SELECT entity_id, COUNT(*) as cnt FROM access_log GROUP BY entity_id"
+        ).fetchall()
+        access_counts = {row["entity_id"]: row["cnt"] for row in rows}
+    except sqlite3.OperationalError:
+        pass
+
+    entities = conn.execute("SELECT * FROM entities").fetchall()
+    today = date.today()
+    rescored = 0
+
+    for row in entities:
+        entity_dict = {
+            "last_seen": row["last_seen"],
+            "day_count": row["day_count"],
+            "distinct_categories": 0,
+            "tags": [],
+            "type": row["type"],
+        }
+        # Try to extract tags from metadata JSON
         try:
-            meta = json.loads(entity.get("metadata", "{}"))
+            import json
+            meta = json.loads(row["metadata"])
+            entity_dict["tags"] = meta.get("tags", [])
+            entity_dict["distinct_categories"] = meta.get("distinct_categories", 0)
         except (json.JSONDecodeError, TypeError):
-            meta = {}
-        entity["tags"] = meta.get("tags", [])
-        entity["distinct_categories"] = meta.get("distinct_categories", 0)
+            pass
 
         new_score = score_entity(
-            entity, access_count=access_map.get(entity["id"], 0), today=today
+            entity_dict,
+            access_count=access_counts.get(row["id"], 0),
+            today=today,
         )
         conn.execute(
             "UPDATE entities SET importance = ? WHERE id = ?",
-            (new_score, entity["id"]),
+            (new_score, row["id"]),
         )
-        updated += 1
+        rescored += 1
 
-    conn.commit()
-    return updated
-
-
-# ---------------------------------------------------------------------------
-# Step D — Statistics & main entry point
-# ---------------------------------------------------------------------------
+    return rescored
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Clean noise data and rescore entity importance in the knowledge base."
+        description="Clean noisy entities and rescore importance in Knowledge Weaver DB"
     )
     parser.add_argument(
         "--db-path",
         default="/root/.openclaw/knowledge/knowledge.db",
-        help="Path to the SQLite database (default: %(default)s)",
+        help="Path to the Knowledge Weaver SQLite database",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print what would be done without modifying the database",
+        help="Print impact summary without making any changes",
     )
     args = parser.parse_args()
 
     if not os.path.exists(args.db_path):
-        print(f"Database not found: {args.db_path}")
+        print(f"Error: Database not found at {args.db_path}")
         sys.exit(1)
 
     conn = sqlite3.connect(args.db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
 
-    # --- Stats before ---
-    before = get_stats(conn)
-    print_stats("Before cleaning", before)
+    # Pre-cleanup stats
+    stats_before = _get_stats(conn)
+    _print_stats("BEFORE CLEANUP", stats_before)
 
-    # --- Step A: identify noise ---
-    noise_ids = collect_noise_ids(conn)
-    print(f"\nNoise entities to remove: {len(noise_ids)}")
-    if noise_ids:
-        sample = list(noise_ids)[:10]
-        ph = ",".join(["?"] * len(sample))
-        names = conn.execute(
-            f"SELECT name FROM entities WHERE id IN ({ph})", tuple(sample)
-        ).fetchall()
-        for n in names:
-            print(f"  - {n['name']}")
+    # Find noisy entities
+    noisy = _find_noisy_entity_ids(conn)
+    all_noisy_ids = []
+    for ids in noisy.values():
+        all_noisy_ids.extend(ids)
 
-    # --- Step B: count weak relations ---
-    weak_count = 0
-    if WEAK_EVIDENCE:
-        ph = ",".join(["?"] * len(WEAK_EVIDENCE))
-        weak_count = conn.execute(
-            f"SELECT COUNT(*) FROM relations WHERE rel_type = 'RELATES_TO' AND evidence IN ({ph})",
-            tuple(WEAK_EVIDENCE),
-        ).fetchone()[0]
-    print(f"Weak RELATES_TO relations to remove: {weak_count}")
+    print(f"\n{'=' * 60}")
+    print(f"  NOISY ENTITY ANALYSIS")
+    print(f"{'=' * 60}")
+    for reason, ids in noisy.items():
+        print(f"  {reason}: {len(ids)} entities")
+    print(f"  Total noisy entities: {len(all_noisy_ids)}")
+
+    # Count weak RELATES_TO
+    placeholders = ",".join("?" * len(_WEAK_RELATES_TO_EVIDENCES))
+    weak_rel_count = conn.execute(
+        f"SELECT COUNT(*) FROM relations WHERE rel_type = 'RELATES_TO' AND evidence IN ({placeholders})",
+        list(_WEAK_RELATES_TO_EVIDENCES),
+    ).fetchone()[0]
+    print(f"  Weak RELATES_TO relations: {weak_rel_count}")
 
     if args.dry_run:
-        print("\n[Dry run — no changes made]")
+        print(f"\n{'=' * 60}")
+        print(f"  DRY RUN — no changes made")
+        print(f"{'=' * 60}")
+        print(f"  Would delete {len(all_noisy_ids)} noisy entities (and their relations/vectors)")
+        print(f"  Would delete {weak_rel_count} weak RELATES_TO relations")
+        print(f"  Would rescore {stats_before['total_entities'] - len(all_noisy_ids)} remaining entities")
         conn.close()
         return
 
-    # --- Execute ---
-    ents_a, rels_a = delete_noise(conn, noise_ids)
-    print(f"\nStep A: Removed {ents_a} noise entities + {rels_a} related relations")
+    # Step A: Delete noisy entities (cascade)
+    del_rel_count = _delete_entities_cascade(conn, all_noisy_ids)
+    print(f"\n  Step A: Deleted {len(all_noisy_ids)} noisy entities, {del_rel_count} related relations")
 
-    rels_b = clean_weak_relations(conn)
-    print(f"Step B: Removed {rels_b} weak RELATES_TO relations")
+    # Step B: Delete weak RELATES_TO relations
+    weak_deleted = _delete_weak_relates_to(conn)
+    print(f"  Step B: Deleted {weak_deleted} weak RELATES_TO relations")
 
-    n = rescore_all(conn)
-    print(f"Step C: Rescored {n} entities")
+    # Step C: Rescore remaining entities
+    rescored = _rescore_entities(conn)
+    print(f"  Step C: Rescored {rescored} entities")
 
-    # --- Stats after ---
-    after = get_stats(conn)
-    print_stats("After cleaning", after)
+    conn.commit()
 
-    ents_diff = before["total_entities"] - after["total_entities"]
-    rels_diff = before["total_relations"] - after["total_relations"]
-    print(f"\nSummary: {ents_diff} entities and {rels_diff} relations removed")
+    # Post-cleanup stats
+    stats_after = _get_stats(conn)
+    _print_stats("AFTER CLEANUP", stats_after)
+
+    # Summary
+    print(f"\n{'=' * 60}")
+    print(f"  SUMMARY")
+    print(f"{'=' * 60}")
+    print(f"  Entities deleted: {stats_before['total_entities'] - stats_after['total_entities']}")
+    for etype in sorted(set(list(stats_before['entities_by_type'].keys()) + list(stats_after['entities_by_type'].keys()))):
+        before = stats_before['entities_by_type'].get(etype, 0)
+        after = stats_after['entities_by_type'].get(etype, 0)
+        delta = before - after
+        if delta > 0:
+            print(f"    {etype}: -{delta}")
+    print(f"  Relations deleted: {stats_before['total_relations'] - stats_after['total_relations']}")
+    print(f"  Vectors deleted: {stats_before['total_vectors'] - stats_after['total_vectors']}")
 
     conn.close()
 

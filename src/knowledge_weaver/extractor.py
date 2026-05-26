@@ -502,9 +502,14 @@ def extract_entities_from_item(
         _add(tech["id"], "tech", tech["name"], tech["summary"])
 
     # If no entity found, create a default entity for the item
-        name = _extract_entity_name(text, entity_type)
-        eid = generate_entity_id(entity_type, name)
-        _add(eid, entity_type, name, text)
+    name = _extract_entity_name(text, entity_type)
+    # Skip default entities that add no structure: if the name is just a
+    # prefix of the text, the "entity" is a truncated copy of the raw text.
+    text_prefix = text[:200]
+    if len(name) >= 4 and (name in text_prefix or _text_overlap_ratio(name, text_prefix) > 0.85):
+        return entities
+    eid = generate_entity_id(entity_type, name)
+    _add(eid, entity_type, name, text)
 
     return entities
 
@@ -534,6 +539,15 @@ def extract_entities_from_section(
             all_entities.append(entity)
 
     return all_entities
+
+
+def _text_overlap_ratio(a: str, b: str) -> float:
+    """Return Jaccard-like character overlap ratio between two strings."""
+    set_a = set(a)
+    set_b = set(b)
+    if not set_a:
+        return 0.0
+    return len(set_a & set_b) / len(set_a)
 
 
 def _extract_entity_name(text: str, entity_type: str) -> str:
