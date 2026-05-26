@@ -80,6 +80,21 @@ _GARBAGE_PATTERNS = [
     re.compile(r".*见日志.*"),
 ]
 
+# Time-stamp log pattern: "15:20 UTC - 先生上线" — DMA session metadata, not knowledge
+_TIMESTAMP_LOG_RE = re.compile(r"^\d{1,2}:\d{2}\s+UTC")
+
+# Tech terms that are too generic to be meaningful knowledge entities
+_TECH_COMMON_WORDS: set[str] = {
+    "AI", "API", "LLM", "CLI", "UTC", "JSON", "YAML", "HTML", "HTTP",
+    "SQL", "URL", "CSS", "XML", "SSH", "SSL", "TLS", "DNS",
+    "CPU", "GPU", "RAM", "SSD", "OS", "IP", "TCP", "UDP",
+}
+
+# Pure structural markers that are NOT real tech concepts
+_STRUCTURAL_TECH_RE = re.compile(
+    r"^(?:\d{4}[_-]\d{2}(?:[_-]\d{2})?|P[0-3])$"
+)
+
 _GARBAGE_NAMES = {
     "", "无", "是", "否", "沟通直接", "确认", "-",
     "潜在", "暂缓", "制定", "事项", "恢复", "行", "任务",
@@ -271,6 +286,12 @@ def _add_tech(kw: str, results: list[dict], seen: set[str]) -> None:
         return
     if _is_garbage_name(kw):
         return
+    # Skip generic tech terms — they add noise without signal
+    if kw.strip().upper() in _TECH_COMMON_WORDS:
+        return
+    # Skip structural markers posing as tech
+    if _STRUCTURAL_TECH_RE.match(kw.strip()):
+        return
     # Exclude common English words that happen to match patterns
     if kw_lower in {"the", "and", "for", "are", "was", "all", "can", "has", "had",
                      "not", "but", "our", "you", "his", "her", "its", "who", "how",
@@ -409,6 +430,9 @@ def _is_garbage_name(name: str) -> bool:
     if not stripped:
         return True
     if stripped in _GARBAGE_NAMES:
+        return True
+    # Filter timestamp log entries (e.g. "15:20 UTC - 先生上线")
+    if _TIMESTAMP_LOG_RE.match(stripped):
         return True
     # Single-character names are never meaningful
     # Two-char is OK for acronyms (HA, MQTT→4 chars) but not for generic words

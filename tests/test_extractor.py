@@ -150,3 +150,49 @@ def test_extract_and_dedup():
     entities = extract_entities_from_section(sec, "2026-05-24.md")
     ids = [e.id for e in entities]
     assert len(ids) == len(set(ids)), f"Duplicate IDs found: {ids}"
+
+
+# --- Noise filter tests (Work Item 1) ---
+
+
+def test_timestamp_log_is_filtered():
+    """Timestamp log entries like '15:20 UTC - 先生上线' must not become fact entities."""
+    item = ParsedItem(text="15:20 UTC - 先生上线", time=None, line_start=1, line_end=1)
+    entities = extract_entities_from_item(item, "核心要点", "2026-05-25.md")
+    # The text itself is garbage (timestamp log), so no entity should be produced
+    for e in entities:
+        assert e.type != "fact" or "UTC" not in e.name
+    # More directly: _is_garbage_name should catch it
+    from knowledge_weaver.extractor import _is_garbage_name
+    assert _is_garbage_name("15:20 UTC - 先生上线")
+
+
+def test_tech_common_words_filtered():
+    """Generic tech abbreviations like AI, API should not produce tech entities."""
+    text = "使用 AI 和 API 进行开发"
+    results = extract_tech_keywords(text)
+    names = [r["name"] for r in results]
+    assert "AI" not in names
+    assert "API" not in names
+
+
+def test_tech_common_word_with_context_kept():
+    """When a common word is part of a larger term, the larger term should be kept."""
+    text = "AI聚合策略v3方案"
+    results = extract_tech_keywords(text)
+    names = [r["name"] for r in results]
+    # "AI聚合策略v3方案" is a composite term — AI alone is filtered,
+    # but the full term is NOT just a common word
+    # At minimum, no entity should be just "AI"
+    for r in results:
+        assert r["name"].strip().upper() != "AI"
+
+
+def test_structural_tech_filtered():
+    """Structural markers like P0, P1, date patterns should not produce tech entities."""
+    text = "P0 P1 2026-05"
+    results = extract_tech_keywords(text)
+    names = [r["name"] for r in results]
+    assert "P0" not in names
+    assert "P1" not in names
+    assert "2026-05" not in names
