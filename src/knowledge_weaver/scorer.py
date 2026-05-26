@@ -1,7 +1,8 @@
-"""Importance scorer — 5-factor weighted scoring for knowledge entities."""
+"""Importance scorer — 6-factor weighted scoring for knowledge entities."""
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 
@@ -9,12 +10,22 @@ class ImportanceScorer:
     """Calculates importance score for entities using multiple factors."""
 
     WEIGHTS: dict[str, float] = {
-        "freshness": 0.35,
-        "frequency": 0.30,
-        "diversity": 0.15,
+        "freshness": 0.25,
+        "frequency": 0.25,
+        "diversity": 0.10,
         "richness": 0.10,
         "access": 0.10,
+        "type_base": 0.20,
     }
+
+    TYPE_BASE: dict[str, float] = {
+        "decision": 0.40, "risk": 0.30, "project": 0.25,
+        "preference": 0.20, "task": 0.10, "tech": 0.05,
+        "fact": 0.0, "idea": 0.0,
+    }
+
+    def type_base(self, entity_type: str) -> float:
+        return self.TYPE_BASE.get(entity_type, 0.0)
 
     def calculate(
         self,
@@ -23,24 +34,28 @@ class ImportanceScorer:
         distinct_categories: int = 1,
         tag_count: int = 0,
         access_count: int = 0,
+        entity_type: str = "fact",
     ) -> float:
-        """Calculate composite importance score (0.0 - 1.0)."""
+        """Calculate composite importance score."""
         score = (
             self.WEIGHTS["freshness"] * self.freshness(days_since_last_seen)
             + self.WEIGHTS["frequency"] * self.frequency(day_count)
             + self.WEIGHTS["diversity"] * self.diversity(distinct_categories)
             + self.WEIGHTS["richness"] * self.richness(tag_count)
             + self.WEIGHTS["access"] * self.access(access_count)
+            + self.WEIGHTS["type_base"] * self.type_base(entity_type)
         )
-        return round(max(0.0, min(1.0, score)), 4)
+        return round(max(0.0, score), 4)
 
     def freshness(self, days_since_last_seen: int) -> float:
         """max(0, 1 - days_since_last_seen / 30)"""
         return max(0.0, 1.0 - days_since_last_seen / 30.0)
 
     def frequency(self, day_count: int) -> float:
-        """min(1, day_count / 7)"""
-        return min(1.0, day_count / 7.0)
+        """log(1 + day_count) / log(8)"""
+        if day_count <= 0:
+            return 0.0
+        return math.log(1 + day_count) / math.log(8)
 
     def diversity(self, distinct_categories: int) -> float:
         """min(1, distinct_categories / 4)"""
@@ -83,6 +98,7 @@ def score_entity(
         distinct_categories=distinct_categories,
         tag_count=tag_count,
         access_count=access_count,
+        entity_type=entity.get("type", "fact"),
     )
 
 
