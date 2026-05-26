@@ -17,20 +17,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from knowledge_weaver.scorer import score_entity
 from knowledge_weaver.extractor import (
     _TIMESTAMP_LOG_RE,
+    _BRACKET_TS_RE,
+    _OPS_LOG_KEYWORDS_RE,
     _TECH_COMMON_WORDS,
     _STRUCTURAL_TECH_RE,
 )
 
-# Weak RELATES_TO evidences derived from DMA category names
+# Weak RELATES_TO evidences — old-style section-title-based evidence
+# that the semantic linker no longer produces
 _WEAK_RELATES_TO_EVIDENCES = (
-    "核心要点",
-    "决策与结论",
-    "已完成事项",
-    "待办与计划",
-    "用户偏好与习惯",
-    "技术/项目要点",
-    "风险与注意事项",
-    "创意与想法",
+    # DMA 8 standard categories
+    "核心要点", "决策与结论", "已完成事项", "待办与计划",
+    "用户偏好与习惯", "技术/项目要点", "风险与注意事项", "创意与想法",
+    # Non-standard section titles discovered in historical data
+    "技能管理",
+    "Agent 连通性测试与 Auto-Announce Bug 排查",
 )
 
 
@@ -78,10 +79,14 @@ def _find_noisy_entity_ids(conn: sqlite3.Connection) -> dict[str, list[str]]:
         "structural_tech": [],
     }
 
-    # Step A1: Timestamp fact entities
+    # Step A1: Timestamp fact entities (multiple patterns)
     rows = conn.execute("SELECT id, name FROM entities WHERE type = 'fact'").fetchall()
     for row in rows:
-        if _TIMESTAMP_LOG_RE.match(row["name"]):
+        name = row["name"]
+        if _TIMESTAMP_LOG_RE.match(name) or _BRACKET_TS_RE.match(name):
+            noisy["timestamp_fact"].append(row["id"])
+        elif _OPS_LOG_KEYWORDS_RE.search(name) and len(name) < 120:
+            # Short operational log items: cron configs, backup status, daemon notifications
             noisy["timestamp_fact"].append(row["id"])
 
     # Step A2: Common tech word entities

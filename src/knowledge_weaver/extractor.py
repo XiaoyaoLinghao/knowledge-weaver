@@ -80,8 +80,14 @@ _GARBAGE_PATTERNS = [
     re.compile(r".*见日志.*"),
 ]
 
-# Time-stamp log pattern: "15:20 UTC - 先生上线" — DMA session metadata, not knowledge
-_TIMESTAMP_LOG_RE = re.compile(r"^\d{1,2}:\d{2}\s+UTC")
+# Time-stamp log patterns — DMA session metadata, not knowledge
+_TIMESTAMP_LOG_RE = re.compile(r"^\d{1,2}:\d{2}\s+UTC")  # "15:20 UTC - ..."
+_BRACKET_TS_RE = re.compile(r"^\[\d{1,2}:\d{2}\]")        # "[01:03] - ..."
+# Operational log keywords: system config, cron, backup status notifications
+_OPS_LOG_KEYWORDS_RE = re.compile(
+    r"(?:cron|backup|Dreaming|dreaming|daily.memory|crontab|UTC\d{1,2}:\d{2})",
+    re.IGNORECASE,
+)
 
 # Tech terms that are too generic to be meaningful knowledge entities
 _TECH_COMMON_WORDS: set[str] = {
@@ -421,6 +427,9 @@ def _is_garbage(text: str) -> bool:
     for pat in _GARBAGE_PATTERNS:
         if pat.match(stripped):
             return True
+    # Operational log items: cron config, backup status, system daemon notifications
+    if _OPS_LOG_KEYWORDS_RE.search(stripped) and len(stripped) < 200:
+        return True
     return False
 
 
@@ -435,8 +444,10 @@ def _is_garbage_name(name: str) -> bool:
     if _TIMESTAMP_LOG_RE.match(stripped):
         return True
     # Single-character names are never meaningful
-    # Two-char is OK for acronyms (HA, MQTT→4 chars) but not for generic words
     if len(stripped) <= 1:
+        return True
+    # Bracket-timestamp format: "[01:03] - ..."
+    if _BRACKET_TS_RE.match(stripped):
         return True
     # Check if the name is purely punctuation/symbols
     if all(c in '（）()""''""【】[]{}，。！？、；：…·*' for c in stripped):
