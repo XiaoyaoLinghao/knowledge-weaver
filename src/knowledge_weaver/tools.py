@@ -62,20 +62,24 @@ def _resolve_entity_id(conn, topic: str) -> str | None:
     return None
 
 
-def _collect_related_ids(conn, entity_id: str, max_depth: int) -> set[str]:
+def _collect_related_ids(conn, entity_id: str, max_depth: int) -> tuple[set[str], list[dict]]:
     """BFS traversal of the relations graph up to max_depth hops.
 
     Uses batch queries per BFS level instead of per-entity queries.
+    Returns (visited_entity_ids, all_relations_raw) where all_relations_raw
+    contains all sqlite3.Row objects traversed during BFS.
     """
+    # fix: removed dead all_relations accumulator; now returns relations for reuse
     visited: set[str] = {entity_id}
     current_level: set[str] = {entity_id}
-    all_relations: list[tuple[str, str, str, float, str]] = []  # (from, to, type, weight, src_id)
+    all_relations: list = []
 
     for depth in range(max_depth):
         if not current_level:
             break
         # Batch-load relations for all entities at this level
         level_rels = get_relations_for_entities(conn, list(current_level))
+        all_relations.extend(level_rels)
         next_level: set[str] = set()
         for rel in level_rels:
             from_id = rel["from_entity"]
@@ -83,14 +87,12 @@ def _collect_related_ids(conn, entity_id: str, max_depth: int) -> set[str]:
             if from_id in current_level and to_id not in visited:
                 visited.add(to_id)
                 next_level.add(to_id)
-                all_relations.append((from_id, to_id, rel["rel_type"], rel["weight"], from_id))
             elif to_id in current_level and from_id not in visited:
                 visited.add(from_id)
                 next_level.add(from_id)
-                all_relations.append((to_id, from_id, rel["rel_type"], rel["weight"], to_id))
         current_level = next_level
 
-    return visited
+    return visited, all_relations
 
 
 def _build_entity_result(row) -> dict[str, Any]:
@@ -244,19 +246,20 @@ def knowledge_trace(
 
     entity_data = _build_entity_result(entity_row)
 
-    # BFS traverse relations
-    related_ids = _collect_related_ids(conn, entity_id, max_depth)
+    # fix: _collect_related_ids now returns relations too, eliminating duplicate I/O
+    related_ids, collected_rels = _collect_related_ids(conn, entity_id, max_depth)
 
     # Batch-load all related entities
     other_ids = [rid for rid in related_ids if rid != entity_id]
     related_entity_map = get_entities_by_ids(conn, other_ids)
 
-    # Pre-load relations for the source entity (for rel_type lookup)
-    source_rels = get_relations_for_entity(conn, entity_id)
+    # Build rel_type lookup from pre-collected relations (no extra DB query)
     source_rel_map: dict[str, tuple[str, float]] = {}
-    for rel in source_rels:
-        other = rel["to_entity"] if rel["from_entity"] == entity_id else rel["from_entity"]
-        source_rel_map[other] = (rel["rel_type"], rel["weight"])
+    for rel in collected_rels:
+        if rel["from_entity"] == entity_id:
+            source_rel_map[rel["to_entity"]] = (rel["rel_type"], rel["weight"])
+        elif rel["to_entity"] == entity_id:
+            source_rel_map[rel["from_entity"]] = (rel["rel_type"], rel["weight"])
 
     # Build related entities list
     related = []
