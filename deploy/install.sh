@@ -3,11 +3,13 @@ set -e
 
 echo "=== Knowledge Weaver Installation ==="
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Create directories
-mkdir -p /root/.openclaw/knowledge/logs
+mkdir -p /root/.openclaw/knowledge /root/.openclaw/logs
 
 # Install package
-cd /root/coding/projects/knowledge-weaver
+cd "$SCRIPT_DIR/.."
 pip install -e ".[dev]"
 
 # Run first consolidation

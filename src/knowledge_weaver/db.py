@@ -256,7 +256,9 @@ def delete_entity(conn: sqlite3.Connection, entity_id: str, auto_commit: bool = 
 
 
 def insert_relation(conn: sqlite3.Connection, rel: dict, auto_commit: bool = True) -> None:
-    """Insert or REPLACE a relation."""
+    """Insert or REPLACE a relation. Self-loops are silently rejected."""
+    if rel.get("from_entity") == rel.get("to_entity"):
+        return
     conn.execute(
         """INSERT OR REPLACE INTO relations (id, from_entity, to_entity, rel_type, weight, evidence)
            VALUES (:id, :from_entity, :to_entity, :rel_type, :weight, :evidence)""",

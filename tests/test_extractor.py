@@ -196,3 +196,19 @@ def test_structural_tech_filtered():
     assert "P0" not in names
     assert "P1" not in names
     assert "2026-05" not in names
+
+
+def test_project_regex_does_not_swallow_verbs():
+    from knowledge_weaver.extractor import extract_projects
+    r = extract_projects("启动ExampleProject项目，确认采用模块化架构")
+    names = [p["name"] for p in r]
+    assert "ExampleProject" in names
+    assert "启动ExampleProject" not in names
+
+
+def test_project_regex_rejects_verbal_phrases():
+    from knowledge_weaver.extractor import extract_projects
+    r = extract_projects("决定基于开源框架作为项目后端基础")
+    names = [p["name"] for p in r]
+    assert all("决定" not in n for n in names)
+    assert all("基于" not in n for n in names)

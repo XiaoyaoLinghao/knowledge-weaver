@@ -219,3 +219,11 @@ def test_default_env_values():
         import importlib
         import knowledge_weaver.server as srv
         importlib.reload(srv)
+
+def test_module_entrypoint_dispatches_to_main(monkeypatch):
+    """`python -m knowledge_weaver unknown` must hit main() and return 1."""
+    import runpy, sys, pytest
+    monkeypatch.setattr(sys, "argv", ["knowledge_weaver", "unknown"])
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_module("knowledge_weaver", run_name="__main__")
+    assert exc.value.code == 1

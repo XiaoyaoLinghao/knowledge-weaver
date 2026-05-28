@@ -224,3 +224,15 @@ class TestConsolidationEdgeCases:
         assert r.entities_updated == 0
         assert r.relations_created == 0
         assert r.errors == []
+
+def test_no_self_loop_relations_after_consolidation(temp_db_path):
+    """After consolidation no relation should have from_entity == to_entity."""
+    import os, sqlite3
+    from knowledge_weaver.pipeline import run_consolidation
+    FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+    run_consolidation(temp_db_path, FIXTURES_DIR, embedder=None)
+    c = sqlite3.connect(temp_db_path)
+    c.row_factory = sqlite3.Row
+    n = c.execute("SELECT COUNT(*) FROM relations WHERE from_entity=to_entity").fetchone()[0]
+    c.close()
+    assert n == 0, f"Found {n} self-loop relations"

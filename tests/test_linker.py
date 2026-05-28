@@ -68,11 +68,10 @@ def test_link_same_entity_id(temp_db_path):
 
     relations = link_cross_day(conn, [new_entity], set())
 
-    assert len(relations) == 1
-    assert relations[0].rel_type == "CONTINUES"
-    assert relations[0].weight == 1.0
-    assert relations[0].from_entity == "entity-001"
-    assert relations[0].to_entity == "entity-001"
+    # Self-loop CONTINUES no longer inserted — returns empty list
+    assert len(relations) == 0
+    # But day_count is still updated
+    assert get_entity(conn, "entity-001")["day_count"] == 2
 
     updated = get_entity(conn, "entity-001")
     assert updated["day_count"] == 2
@@ -211,9 +210,8 @@ def test_link_cross_day_co_occurrence(temp_db_path):
 
     relations = link_cross_day(conn, new_entities, set())
 
-    # ent-a and ent-b should get CONTINUES, ent-d is new so none
-    assert len(relations) == 2
-    assert all(r.rel_type == "CONTINUES" for r in relations)
+    # Self-loop CONTINUES no longer inserted — returns empty list
+    assert len(relations) == 0
 
     assert get_entity(conn, "ent-a")["day_count"] == 2
     assert get_entity(conn, "ent-b")["day_count"] == 2

@@ -52,8 +52,10 @@ DEFAULT_IMPORTANCE: dict[str, float] = {
 # --- Level 1: Deterministic patterns (no hardcoded names — auto-discovered from data) ---
 
 # Project name detection patterns (language-agnostic, no user-specific names)
-# Chinese: {name}项目 e.g. "心连心项目"
-_PROJECT_CN_RE = re.compile(r"([一-鿿\w]+)项目")
+# Chinese: {name}项目 e.g. "心连心项目" — limit to 2-12 CJK chars immediately before 项目
+_PROJECT_CN_RE = re.compile(r"([一-鿿]{2,12})项目")
+# Latin project names immediately before 项目: CamelCase or ALL_CAPS abbreviations
+_PROJECT_LATIN_BEFORE_CN_RE = re.compile(r"([A-Z][A-Za-z0-9]{1,30})项目")
 # English: CamelCase words that look like project names e.g. HomeBrain, OpenClaw
 _PROJECT_CAMEL_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
 # English: "X Project" / "X project"
@@ -108,6 +110,36 @@ _GARBAGE_NAMES = {
 }
 
 _GARBAGE_NAME_MIN_LENGTH = 2
+
+# Verb prefixes that should be stripped from project names extracted via _PROJECT_CN_RE
+_PROJECT_VERB_PREFIXES = ("启动", "完成", "决定", "开始", "上线", "推进", "继续", "完成了")
+
+# Structural words that indicate a phrase rather than a project name
+_PROJECT_STRUCTURAL_WORDS = frozenset({
+    "基于", "作为", "采用", "使用", "通过", "包含", "利用", "按照", "针对", "关于",
+})
+
+
+def _strip_verb_prefix(name: str) -> str:
+    """Remove a known verb prefix from a potential project name.
+
+    If stripping leaves fewer than 2 characters, the result is considered
+    invalid, and the caller should skip the match.
+    """
+    for v in _PROJECT_VERB_PREFIXES:
+        if name.startswith(v) and len(name) > len(v) + 1:
+            return name[len(v):]
+    return name
+
+
+def _is_valid_project_name(name: str) -> bool:
+    """Return False if the name contains structural words that make it look like a phrase."""
+    if len(name) < 2:
+        return False
+    for w in _PROJECT_STRUCTURAL_WORDS:
+        if w in name:
+            return False
+    return True
 
 # Time/duration descriptions that are not meaningful entities
 _DURATION_RE = re.compile(r'^[\d\-~至到]+[hHdDwW月年天周）)]?$|^[\d.]+\s*[hHdDwW月年天周]$')
@@ -206,15 +238,28 @@ def extract_projects(text: str) -> list[dict]:
     - Chinese: {name}项目 (e.g. "心连心项目" → 心连心)
     - English: CamelCase words (e.g. HomeBrain, OpenClaw)
     - English: "X Project" (e.g. "HomeBrain project")
-    - Backtick-quoted names: `project-name`
+    - Latin names immediately before 项目 (e.g. "ExampleProject项目")
     """
     results: list[dict] = []
     seen: set[str] = set()
+    latin_spans: set[tuple[int, int]] = set()
 
-    # Pattern 1: Chinese project references: {name}项目
-    for m in _PROJECT_CN_RE.finditer(text):
+    # Pattern 1a: Latin project name immediately before 项目 (e.g. "ExampleProject项目")
+    for m in _PROJECT_LATIN_BEFORE_CN_RE.finditer(text):
         name = m.group(1).strip()
-        if name and name not in seen and not _is_garbage_name(name):
+        if name and name not in seen and not _is_garbage_name(name) and len(name) >= 3:
+            seen.add(name)
+            latin_spans.add(m.span(1))
+            results.append(_make_entity("project", name, text))
+
+    # Pattern 1b: Chinese project references: {name}项目
+    for m in _PROJECT_CN_RE.finditer(text):
+        # Skip if this span was already captured by the Latin-before-CN pattern
+        if m.span(1) in latin_spans:
+            continue
+        raw_name = m.group(1).strip()
+        name = _strip_verb_prefix(raw_name)
+        if name and _is_valid_project_name(name) and name not in seen and not _is_garbage_name(name):
             seen.add(name)
             results.append(_make_entity("project", name, text))
 

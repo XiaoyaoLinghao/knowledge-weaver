@@ -236,3 +236,19 @@ def _entity(eid, etype, name, importance=0.5, date="2026-05-24"):
         "source_lines": f'["{date}.md:1:1"]',
         "metadata": "{}",
     }
+
+def test_insert_relation_rejects_self_loop(temp_db_path):
+    from knowledge_weaver.db import init_db, insert_entity, insert_relation
+    conn = init_db(temp_db_path)
+    insert_entity(conn, {
+        "id": "proj:x", "type": "project", "name": "X", "summary": "X",
+        "importance": 0.5, "first_seen": "2026-05-24", "last_seen": "2026-05-24",
+        "day_count": 1, "source_lines": "[]", "metadata": "{}",
+    })
+    insert_relation(conn, {
+        "id": "rel:self", "from_entity": "proj:x", "to_entity": "proj:x",
+        "rel_type": "CONTINUES", "weight": 1.0, "evidence": "test",
+    })
+    n = conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+    conn.close()
+    assert n == 0

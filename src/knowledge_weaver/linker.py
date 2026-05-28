@@ -203,62 +203,17 @@ def link_cross_day(
     new_entities: list[ExtractedEntity],
     existing_entity_ids: set[str],
 ) -> list[LinkedRelation]:
-    """Handle cross-day linking.
+    """Handle cross-day entity continuity — update day_count for known entities.
 
-    Rules:
-    - Same entity ID seen on different days -> CONTINUES (weight 1.0), update day_count
-    - Also check DB for existing entities with same ID
+    Self-loop CONTINUES/REFINES relations are no longer inserted because
+    they pollute the relationship graph without adding information (the
+    entity ID already encodes continuity).
     """
-    relations: list[LinkedRelation] = []
-
     for entity in new_entities:
         db_entity = get_entity(conn, entity.id)
-        is_known = db_entity is not None or entity.id in existing_entity_ids
-
-        if is_known:
-            rel = LinkedRelation(
-                id=generate_relation_id(entity.id, entity.id, "CONTINUES"),
-                from_entity=entity.id,
-                to_entity=entity.id,
-                rel_type="CONTINUES",
-                weight=1.0,
-                evidence=entity.first_seen,
-            )
-            insert_relation(conn, {
-                "id": rel.id,
-                "from_entity": rel.from_entity,
-                "to_entity": rel.to_entity,
-                "rel_type": rel.rel_type,
-                "weight": rel.weight,
-                "evidence": rel.evidence,
-            }, auto_commit=False)
-            relations.append(rel)
 
         if db_entity is not None:
             new_day_count = db_entity["day_count"] + 1
-
-            # REFINES: new summary is >50% longer — the understanding deepened
-            old_summary_len = len(db_entity["summary"] or "")
-            new_summary_len = len(entity.summary or "")
-            if new_summary_len > old_summary_len * 1.5:
-                refines_rel = LinkedRelation(
-                    id=generate_relation_id(entity.id, entity.id, "REFINES"),
-                    from_entity=entity.id,
-                    to_entity=entity.id,
-                    rel_type="REFINES",
-                    weight=0.8,
-                    evidence=f"summary_expanded:{old_summary_len}→{new_summary_len}",
-                )
-                insert_relation(conn, {
-                    "id": refines_rel.id,
-                    "from_entity": refines_rel.from_entity,
-                    "to_entity": refines_rel.to_entity,
-                    "rel_type": refines_rel.rel_type,
-                    "weight": refines_rel.weight,
-                    "evidence": refines_rel.evidence,
-                }, auto_commit=False)
-                relations.append(refines_rel)
-
             conn.execute(
                 "UPDATE entities SET day_count=?, last_seen=?, updated_at=datetime('now') WHERE id=?",
                 (new_day_count, entity.last_seen, entity.id),
@@ -277,7 +232,7 @@ def link_cross_day(
 
         existing_entity_ids.add(entity.id)
 
-    return relations
+    return []
 
 
 def link_project_dependencies(
