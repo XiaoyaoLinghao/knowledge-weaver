@@ -252,3 +252,13 @@ def test_insert_relation_rejects_self_loop(temp_db_path):
     n = conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
     conn.close()
     assert n == 0
+
+def test_vec_available_per_connection(tmp_path):
+    """sqlite-vec capability is tracked per connection, not globally."""
+    from knowledge_weaver.db import init_db, _can_use_vec
+    db1 = init_db(str(tmp_path / "a.db"))
+    db2 = init_db(str(tmp_path / "b.db"))
+    r1 = _can_use_vec(db1)
+    r2 = _can_use_vec(db2)
+    assert r1 == r2
+    db1.close(); db2.close()

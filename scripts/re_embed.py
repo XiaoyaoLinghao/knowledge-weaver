@@ -16,8 +16,8 @@ import sys
 # Allow imports from project src
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from knowledge_weaver.db import init_db, DEFAULT_DIMENSION
-from knowledge_weaver.embedder import get_embedder
+from knowledge_weaver.db import init_db
+from knowledge_weaver.embedder import DEFAULT_DIMENSION, get_embedder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

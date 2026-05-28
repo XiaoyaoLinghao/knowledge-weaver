@@ -76,13 +76,20 @@ CREATE TABLE IF NOT EXISTS entity_vectors (
 );
 """
 
-# Track whether sqlite-vec virtual table is available
-_vec_available: bool = False
+# Per-connection sqlite-vec availability (keyed by id(conn), cleared on close)
+_vec_loaded_conns: dict[int, bool] = {}
+
+
+def _mark_vec_loaded(conn: sqlite3.Connection) -> None:
+    _vec_loaded_conns[id(conn)] = True
+
+
+def _is_vec_loaded(conn: sqlite3.Connection) -> bool:
+    return _vec_loaded_conns.get(id(conn), False)
 
 
 def init_db(db_path: str) -> sqlite3.Connection:
     """Initialize SQLite database with all tables and indexes. Returns connection."""
-    global _vec_available
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
@@ -98,15 +105,14 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         _init_vec_virtual_table(conn)
-        _vec_available = True
+        _mark_vec_loaded(conn)
         _migrate_vectors_to_vec(conn)
     except Exception:
         # Check if entity_vec already exists (from a previous successful init)
         try:
             conn.execute("SELECT count(*) FROM entity_vec LIMIT 1")
-            _vec_available = True
+            _mark_vec_loaded(conn)
         except Exception:
-            _vec_available = False
             logger.warning(
                 "sqlite-vec extension not available; using Python-based vector search. "
                 "Install sqlite-vec for native vector search support."
@@ -366,25 +372,18 @@ def get_access_count(conn: sqlite3.Connection, entity_id: str) -> int:
 def _can_use_vec(conn: sqlite3.Connection) -> bool:
     """Check if sqlite-vec virtual table is usable with this connection.
 
-    Loads the extension if not yet loaded for this connection, then probes
-    the entity_vec table. Caches result in module-level _vec_available.
+    Results are tracked per-connection — a connection that fails to load
+    the extension will not retry, and a connection that succeeds will
+    not need to re-load.
     """
-    global _vec_available
-    if _vec_available:
-        # Extension was loaded before; ensure this connection has it too
-        try:
-            conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
-        except Exception:
-            pass
+    if _is_vec_loaded(conn):
         return True
     try:
         conn.enable_load_extension(True)
         import sqlite_vec
         sqlite_vec.load(conn)
         conn.execute("SELECT count(*) FROM entity_vec LIMIT 1")
-        _vec_available = True
+        _mark_vec_loaded(conn)
         return True
     except Exception:
         return False

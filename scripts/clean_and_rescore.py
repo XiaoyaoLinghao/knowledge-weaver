@@ -125,13 +125,34 @@ def _delete_entities_cascade(conn: sqlite3.Connection, entity_ids: list[str]) ->
         entity_ids + entity_ids,
     )
 
-    # Delete entity vectors
+    # Delete entity vectors (plain table)
     try:
         conn.execute(
             f"DELETE FROM entity_vectors WHERE entity_id IN ({placeholders})",
             entity_ids,
         )
     except sqlite3.OperationalError:
+        pass
+
+    # Sync FTS index
+    try:
+        conn.execute(
+            f"DELETE FROM entity_fts WHERE entity_id IN ({placeholders})",
+            entity_ids,
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # Sync sqlite-vec virtual table (best-effort: extension may not be loaded)
+    try:
+        conn.enable_load_extension(True)
+        import sqlite_vec  # noqa: F811
+        sqlite_vec.load(conn)
+        conn.execute(
+            f"DELETE FROM entity_vec WHERE entity_id IN ({placeholders})",
+            entity_ids,
+        )
+    except Exception:
         pass
 
     # Delete entities

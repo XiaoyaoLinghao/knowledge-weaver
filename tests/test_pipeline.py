@@ -265,3 +265,19 @@ def test_tech_entities_have_no_cjk_noise(temp_db_path):
         for pattern in noise:
             assert pattern not in n, f"Tech name {n!r} contains noise pattern {pattern!r}"
     c.close()
+
+def test_empty_parse_does_not_lock_manifest(temp_db_path, tmp_path):
+    """When a file parses to zero sections, its manifest entry must not block re-processing."""
+    from knowledge_weaver.pipeline import run_consolidation
+    f = tmp_path / "2026-05-20.md"
+    f.write_text("not a valid dma file", encoding="utf-8")
+    r1 = run_consolidation(temp_db_path, str(tmp_path), embedder=None)
+    assert r1.files_processed == 1
+    # fix the file, re-run, expect it to be processed (not skipped)
+    f.write_text(
+        "---\ntitle: t\ndate: 2026-05-20\n---\n\n## 核心要点\n- 启动 NewProj 项目\n",
+        encoding="utf-8",
+    )
+    r2 = run_consolidation(temp_db_path, str(tmp_path), embedder=None)
+    assert r2.files_skipped == 0
+    assert r2.files_processed == 1

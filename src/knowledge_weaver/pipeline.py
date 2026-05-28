@@ -291,13 +291,13 @@ def _process_file(
     # Step 3: Parse
     parsed = parse_dma_file(filepath)
     if not parsed.sections:
-        # Empty file or parse failure — still record manifest
+        # Empty file or parse failure — record manifest but allow retry
         upsert_manifest(conn, {
             "date": date_str,
             "file_path": filepath,
-            "file_hash": file_hash,
+            "file_hash": "",  # don't lock the hash; allow retry on next run
             "entity_count": 0,
-            "status": "ok",
+            "status": "empty",
         })
         result.files_processed += 1
         return
