@@ -69,8 +69,12 @@ _TECH_CAMEL_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
 # Capitalized English words in Chinese context: 使用Python开发 → Python
 # Uses lookahead/lookbehind to avoid consuming surrounding CN chars for subsequent matches
 _TECH_CN_SURROUND_RE = re.compile(r"(?<=[一-鿿，。；：、！？　])([A-Z][a-zA-Z0-9]{1,20})(?=[一-鿿，。；：、！？　])")
-# Terms with version suffixes: Python3, ESP32-S3
-_TECH_VERSION_RE = re.compile(r"\b(\w+(?:[._-]?\d+(?:\.\d+)*[a-z]*))\b")
+# Terms with version suffixes: Python3, ESP32-S3 — ASCII-only, no CJK neighbors
+_TECH_VERSION_RE = re.compile(
+    r"(?:(?<=^)|(?<=[\s\(\[，。；:、]))"
+    r"([A-Za-z][A-Za-z0-9]*[._-]?\d+(?:\.\d+)*[a-z]*)"
+    r"(?=[\s\)\]，。；:、]|$)"
+)
 # Terms in backticks (code references): `nginx.conf`, `device_aggregator.py`
 _TECH_BACKTICK_RE = re.compile(r"`([a-zA-Z][\w./_-]+)`")
 # Common tech file extensions detected in context
@@ -103,6 +107,8 @@ _STRUCTURAL_TECH_RE = re.compile(
     r"^(?:\d{4}[_-]\d{2}(?:[_-]\d{2})?|P[0-3])$"
 )
 
+# Hand-curated list of strings that appear as DMA artifacts (not real entity names).
+# Add a string here if it ever appears as a noisy entity name in production data.
 _GARBAGE_NAMES = {
     "", "无", "是", "否", "沟通直接", "确认", "-",
     "潜在", "暂缓", "制定", "事项", "恢复", "行", "任务",

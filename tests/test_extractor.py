@@ -212,3 +212,19 @@ def test_project_regex_rejects_verbal_phrases():
     names = [p["name"] for p in r]
     assert all("决定" not in n for n in names)
     assert all("基于" not in n for n in names)
+
+def test_tech_does_not_extract_cjk_numbers():
+    from knowledge_weaver.extractor import extract_tech_keywords
+    for text in ["2000+实体压缩87%，耗时<1秒", "但95%以上实体命名包含三段"]:
+        r = extract_tech_keywords(text)
+        for kw in r:
+            assert not any('一' <= ch <= '鿿' for ch in kw["name"]), \
+                f"unexpected CJK in tech name: {kw['name']!r}"
+
+
+def test_tech_still_extracts_versioned_terms():
+    from knowledge_weaver.extractor import extract_tech_keywords
+    r = extract_tech_keywords("Use Python3 and ESP32-S3 with Node18")
+    names = [k["name"] for k in r]
+    assert "Python3" in names
+    assert any("ESP32" in n for n in names)

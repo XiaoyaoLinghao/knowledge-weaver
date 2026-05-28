@@ -343,15 +343,19 @@ def _process_file(
             )
             if merged_id:
                 logger.debug("Merging %s → %s (name similarity)", extracted.id, merged_id)
+                db_entity = get_entity(conn, merged_id)
+                # Merge source_lines from old and new to preserve full provenance
+                old_sources = json.loads(db_entity["source_lines"] or "[]") if db_entity else []  # type: ignore[union-attr]
+                new_sources = json.loads(extracted.source_lines or "[]")
+                merged_sources = list(dict.fromkeys(old_sources + new_sources))
                 extracted = ExtractedEntity(
                     id=merged_id,
                     type=extracted.type,
                     name=extracted.name,
                     summary=extracted.summary,
-                    source_lines=extracted.source_lines,
+                    source_lines=json.dumps(merged_sources, ensure_ascii=False),
                     metadata=extracted.metadata,
                 )
-                db_entity = get_entity(conn, merged_id)
             if db_entity is not None:
                 new_day_count = db_entity["day_count"] + 1
                 first_seen = min(db_entity["first_seen"], date_str)

@@ -15,10 +15,10 @@ class MockEmbedder:
     """Mock embedder that returns fixed vectors for testing."""
 
     def embed(self, text: str) -> list[float]:
-        return [0.1] * 768
+        return [0.1] * 1024
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [[0.1] * 768 for _ in texts]
+        return [[0.1] * 1024 for _ in texts]
 
     def close(self):
         pass
@@ -236,3 +236,32 @@ def test_no_self_loop_relations_after_consolidation(temp_db_path):
     n = c.execute("SELECT COUNT(*) FROM relations WHERE from_entity=to_entity").fetchone()[0]
     c.close()
     assert n == 0, f"Found {n} self-loop relations"
+
+def test_exampleproject_exists_as_clean_project(temp_db_path):
+    """ExampleProject must exist as an independent project entity."""
+    import os, sqlite3
+    from knowledge_weaver.pipeline import run_consolidation
+    FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+    run_consolidation(temp_db_path, FIXTURES_DIR, embedder=None)
+    c = sqlite3.connect(temp_db_path); c.row_factory = sqlite3.Row
+    rows = c.execute("SELECT id, name FROM entities WHERE type='project'").fetchall()
+    names = [r["name"] for r in rows]
+    c.close()
+    assert "ExampleProject" in names, f"Got project names: {names}"
+
+
+def test_tech_entities_have_no_cjk_noise(temp_db_path):
+    """Tech entity names must not contain CJK-number noise from version regex."""
+    import os, sqlite3
+    from knowledge_weaver.pipeline import run_consolidation
+    FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+    run_consolidation(temp_db_path, FIXTURES_DIR, embedder=None)
+    c = sqlite3.connect(temp_db_path); c.row_factory = sqlite3.Row
+    rows = c.execute("SELECT name FROM entities WHERE type='tech'").fetchall()
+    names = [r["name"] for r in rows]
+    # P1-5 fixed _TECH_VERSION_RE to exclude CJK — these noise patterns must be gone
+    noise = ["但95", "实体压缩87"]
+    for n in names:
+        for pattern in noise:
+            assert pattern not in n, f"Tech name {n!r} contains noise pattern {pattern!r}"
+    c.close()

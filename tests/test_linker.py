@@ -363,3 +363,18 @@ def test_shared_tokens_respect_min_shared(temp_db_path):
     # Unrelated entities in the same section get a low-weight co_occurrence relation
     assert len(relations) == 1
     assert relations[0].weight == 0.3
+
+def test_link_project_dependencies_skips_short_names():
+    from knowledge_weaver.db import init_db
+    from knowledge_weaver.linker import link_project_dependencies, ExtractedEntity
+    import tempfile, os
+    fd, db = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    conn = init_db(db)
+    proj = ExtractedEntity(id="proj:ai", type="project", name="AI",
+                           summary="AI", first_seen="2026-05-24", last_seen="2026-05-24")
+    task = ExtractedEntity(id="task:fixci", type="task", name="修复 CI",
+                           summary="修复 CI 流程", first_seen="2026-05-24", last_seen="2026-05-24")
+    rels = link_project_dependencies(conn, [proj, task])
+    conn.close(); os.unlink(db)
+    assert all(r.rel_type != "DEPENDS_ON" for r in rels), \
+        "Short project name 'AI' must not produce DEPENDS_ON"

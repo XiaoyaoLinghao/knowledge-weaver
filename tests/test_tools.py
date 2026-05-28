@@ -441,3 +441,16 @@ class TestKnowledgeStats:
         assert result["total_relations"] == 0
         assert result["indexed_days"] == 0
         assert result["entity_counts"] == {}
+
+def test_default_min_score_does_not_hide_fact_entities(conn_seeded):
+    from knowledge_weaver.tools import knowledge_search
+    from knowledge_weaver.db import insert_entity
+    insert_entity(conn_seeded, {
+        "id": "fact:lowscore", "type": "fact", "name": "low score fact",
+        "summary": "some summary content", "importance": 0.05,
+        "first_seen": "2026-05-24", "last_seen": "2026-05-24",
+        "day_count": 1, "source_lines": "[]", "metadata": "{}",
+    })
+    r = knowledge_search(conn_seeded, query="low score fact")
+    assert any(x["entity_id"] == "fact:lowscore" for x in r["results"]), \
+        "Default min_score should not hide low-importance entities"

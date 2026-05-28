@@ -127,7 +127,7 @@ def knowledge_search(
     query: str,
     entity_type: str | None = None,
     max_results: int = 10,
-    min_score: float = 0.3,
+    min_score: float = 0.0,
     embedder=None,
 ) -> dict:
     """Semantic / text search for knowledge entities.
@@ -342,10 +342,12 @@ def active_projects(
     projects = []
     for row in active:
         # Attach open task entities (tasks with same project in name/summary)
+        from knowledge_weaver.linker import _is_substring_safe_project_name
         open_tasks = [
             t["summary"][:100]
             for t in all_tasks
-            if row["name"].lower() in (t["name"] + t["summary"]).lower()
+            if _is_substring_safe_project_name(row["name"])
+            and row["name"].lower() in (t["name"] + t["summary"]).lower()
         ][:5]
 
         status = "active" if row["day_count"] >= 3 else "recent"

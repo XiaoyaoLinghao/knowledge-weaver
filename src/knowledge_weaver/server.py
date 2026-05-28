@@ -79,7 +79,7 @@ def create_server() -> FastMCP:
         query: str,
         entity_type: str = "",
         max_results: int = 10,
-        min_score: float = 0.3,
+        min_score: float = 0.0,
         offset: int = 0,
     ) -> str:
         """Search the structured knowledge base for entities by keyword or semantic similarity.

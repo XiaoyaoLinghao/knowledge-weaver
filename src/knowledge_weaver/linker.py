@@ -13,6 +13,17 @@ from knowledge_weaver.db import (
 )
 
 
+# Minimum project name length for substring matching (shorter = too ambiguous)
+_MIN_PROJECT_NAME_LEN = 3
+# Generic project names that should not participate in substring matching
+_PROJECT_NAME_BLOCKLIST = {"项目", "系统", "服务", "Project", "System"}
+
+
+def _is_substring_safe_project_name(name: str) -> bool:
+    """Return True if the project name is safe for substring-based matching."""
+    return len(name) >= _MIN_PROJECT_NAME_LEN and name not in _PROJECT_NAME_BLOCKLIST
+
+
 @dataclass
 class ExtractedEntity:
     id: str
@@ -50,6 +61,24 @@ class LinkedRelation:
 def generate_relation_id(from_id: str, to_id: str, rel_type: str) -> str:
     """Generate consistent deterministic relation ID."""
     return f"rel:{from_id}->{to_id}:{rel_type}"
+
+
+# Type pairs eligible for co_occurrence linking (avoid O(n²) noise).
+# Only include pairs where co-occurrence implies semantic connection.
+# tech/fact are too numerous and produce noise when cross-linked.
+_CO_OCCURRENCE_PAIRS: frozenset[frozenset[str]] = frozenset({
+    frozenset({"decision", "risk"}),
+    frozenset({"decision", "project"}),
+    frozenset({"decision", "preference"}),
+    frozenset({"risk", "project"}),
+    frozenset({"risk", "preference"}),
+    frozenset({"project", "preference"}),
+    frozenset({"project", "task"}),
+    frozenset({"decision", "task"}),
+    frozenset({"risk", "task"}),
+    frozenset({"idea", "project"}),
+    frozenset({"idea", "decision"}),
+})
 
 
 MAX_PER_FILE_RELATIONS = 500
@@ -131,25 +160,6 @@ def link_entities_in_file(
     for e in entities:
         by_section.setdefault(e.section_title, []).append(e)
 
-    # Type pairs eligible for co_occurrence linking (avoid O(n²) noise)
-    # Only include pairs where co-occurrence implies semantic connection.
-    # tech/fact are too numerous and produce noise when cross-linked.
-    _CO_OCCURRENCE_PAIRS = {
-        # Core high-value types
-        frozenset({"decision", "risk"}),
-        frozenset({"decision", "project"}),
-        frozenset({"decision", "preference"}),
-        frozenset({"risk", "project"}),
-        frozenset({"risk", "preference"}),
-        frozenset({"project", "preference"}),
-        # Project/task/decision/risk links
-        frozenset({"project", "task"}),
-        frozenset({"decision", "task"}),
-        frozenset({"risk", "task"}),
-        # Idea links
-        frozenset({"idea", "project"}),
-        frozenset({"idea", "decision"}),
-    }
 
     # Same-section linking — semantic condition (name mention or shared tokens)
     for section_entities in by_section.values():
@@ -268,6 +278,8 @@ def link_project_dependencies(
             continue
 
         for project in projects:
+            if not _is_substring_safe_project_name(project.name):
+                continue
             if project.name.lower() in entity.name.lower() or \
                project.name.lower() in entity.summary.lower():
                 rel = LinkedRelation(
