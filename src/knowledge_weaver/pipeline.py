@@ -169,6 +169,11 @@ def run_consolidation(
         result.errors.append(str(exc))
         result.status = "error"
     finally:
+        # fix: VACUUM to reclaim space from DELETE/INSERT operations
+        try:
+            conn.execute("VACUUM")
+        except Exception:
+            pass
         conn.close()
 
     return result

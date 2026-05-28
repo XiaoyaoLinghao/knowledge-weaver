@@ -277,6 +277,9 @@ def main() -> None:
 
     conn.commit()
 
+    # fix: VACUUM to reclaim space from DELETE operations
+    conn.execute("VACUUM")
+
     # Post-cleanup stats
     stats_after = _get_stats(conn)
     _print_stats("AFTER CLEANUP", stats_after)
