@@ -227,3 +227,13 @@ def test_module_entrypoint_dispatches_to_main(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         runpy.run_module("knowledge_weaver", run_name="__main__")
     assert exc.value.code == 1
+
+def test_console_script_callable_via_main():
+    """The console-script entry point resolves to server.main."""
+    import importlib.metadata as md
+    eps = md.entry_points(group="console_scripts")
+    names = [e.name for e in eps]
+    if "knowledge-weaver" in names:
+        ep = next(e for e in eps if e.name == "knowledge-weaver")
+        func = ep.load()
+        assert callable(func)

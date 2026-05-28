@@ -1,2 +1,4 @@
-# Knowledge Weaver nightly consolidation (after DMA's 30-min cycle settles)
-0 4 * * * cd /root/coding/projects/knowledge-weaver && python3 -c "from knowledge_weaver.server import DB_PATH, MEMORY_DIR, get_embedder; from knowledge_weaver.pipeline import run_consolidation; e=get_embedder(); r=run_consolidation(DB_PATH, MEMORY_DIR, e) if e else None; print(f'Consolidation: {r.status} ({r.entities_created} new, {r.entities_updated} updated, {r.files_skipped} skipped)') if r else print('Embedder not configured')" >> /root/.openclaw/logs/knowledge-weaver.log 2>&1
+# Knowledge Weaver nightly consolidation
+0 4 * * * cd /root/coding/projects/knowledge-weaver && /usr/bin/python3 -m knowledge_weaver consolidate >> /root/.openclaw/logs/knowledge-weaver.log 2>&1
+# Knowledge Weaver nightly cleanup
+30 4 * * * cd /root/coding/projects/knowledge-weaver && /usr/bin/python3 scripts/clean_and_rescore.py --db-path /root/.openclaw/knowledge/knowledge.db >> /root/.openclaw/logs/knowledge-weaver.log 2>&1
