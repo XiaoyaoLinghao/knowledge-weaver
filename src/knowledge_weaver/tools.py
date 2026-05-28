@@ -167,10 +167,21 @@ def knowledge_search(
     scored_candidates = filter_by_score(candidates, min_score=min_score, today=today)
 
     # Step 4: build results
+    # fix: batch-load relations for all candidates to eliminate N+1
+    candidates_slice = scored_candidates[:max_results]
+    all_candidate_ids = [c.get("id", "") for c in candidates_slice if c.get("id")]
+    batch_rels = get_relations_for_entities(conn, all_candidate_ids)
+    # Build eid -> [related_rels] map
+    from collections import defaultdict
+    rels_by_eid: dict[str, list] = defaultdict(list)
+    for rel in batch_rels:
+        rels_by_eid[rel["from_entity"]].append(rel)
+        rels_by_eid[rel["to_entity"]].append(rel)
+
     results = []
-    for entity in scored_candidates[:max_results]:
+    for entity in candidates_slice:
         eid = entity.get("id", "")
-        related_rels = get_relations_for_entity(conn, eid)
+        related_rels = rels_by_eid.get(eid, [])
         related_ids = [
             r["to_entity"] if r["from_entity"] == eid else r["from_entity"]
             for r in related_rels[:5]
