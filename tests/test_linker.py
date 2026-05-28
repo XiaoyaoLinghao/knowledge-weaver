@@ -271,7 +271,10 @@ def test_no_relation_for_unrelated_entities(temp_db_path):
     )
 
     relations = link_entities_in_file(conn, [e1, e2], parsed_file, "/notes/2024-01-01.md")
-    assert len(relations) == 0
+    # Unrelated entities in the same section get a low-weight co_occurrence relation
+    assert len(relations) == 1
+    assert relations[0].weight == 0.3
+    assert relations[0].evidence == "co_occurrence"
 
 
 def test_relation_via_name_mention(temp_db_path):
@@ -359,4 +362,6 @@ def test_shared_tokens_respect_min_shared(temp_db_path):
     )
 
     relations = link_entities_in_file(conn, [e1, e2], parsed_file, "/notes/2024-01-01.md")
-    assert len(relations) == 0
+    # Unrelated entities in the same section get a low-weight co_occurrence relation
+    assert len(relations) == 1
+    assert relations[0].weight == 0.3

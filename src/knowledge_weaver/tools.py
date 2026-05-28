@@ -16,7 +16,9 @@ from collections import deque
 from typing import Any
 
 from knowledge_weaver.db import (
+    get_entities_by_ids,
     get_entity,
+    get_relations_for_entities,
     get_relations_for_entity,
     list_all_entities,
     list_all_manifest,
@@ -61,23 +63,32 @@ def _resolve_entity_id(conn, topic: str) -> str | None:
 
 
 def _collect_related_ids(conn, entity_id: str, max_depth: int) -> set[str]:
-    """BFS traversal of the relations graph up to max_depth hops."""
+    """BFS traversal of the relations graph up to max_depth hops.
+
+    Uses batch queries per BFS level instead of per-entity queries.
+    """
     visited: set[str] = {entity_id}
-    queue: deque[tuple[str, int]] = deque([(entity_id, 0)])
+    current_level: set[str] = {entity_id}
+    all_relations: list[tuple[str, str, str, float, str]] = []  # (from, to, type, weight, src_id)
 
-    while queue:
-        current_id, depth = queue.popleft()
-        if depth >= max_depth:
-            continue
-
-        relations = get_relations_for_entity(conn, current_id)
-        for rel in relations:
-            other_id = (
-                rel["to_entity"] if rel["from_entity"] == current_id else rel["from_entity"]
-            )
-            if other_id not in visited:
-                visited.add(other_id)
-                queue.append((other_id, depth + 1))
+    for depth in range(max_depth):
+        if not current_level:
+            break
+        # Batch-load relations for all entities at this level
+        level_rels = get_relations_for_entities(conn, list(current_level))
+        next_level: set[str] = set()
+        for rel in level_rels:
+            from_id = rel["from_entity"]
+            to_id = rel["to_entity"]
+            if from_id in current_level and to_id not in visited:
+                visited.add(to_id)
+                next_level.add(to_id)
+                all_relations.append((from_id, to_id, rel["rel_type"], rel["weight"], from_id))
+            elif to_id in current_level and from_id not in visited:
+                visited.add(from_id)
+                next_level.add(from_id)
+                all_relations.append((to_id, from_id, rel["rel_type"], rel["weight"], to_id))
+        current_level = next_level
 
     return visited
 
@@ -191,7 +202,7 @@ def knowledge_search(
         try:
             log_access(conn, eid, "knowledge_search", query)
         except Exception:
-            pass
+            logger.warning("Failed to log access for %s", eid)
 
     return {"results": results, "total_hits": len(results)}
 
@@ -225,23 +236,24 @@ def knowledge_trace(
     # BFS traverse relations
     related_ids = _collect_related_ids(conn, entity_id, max_depth)
 
+    # Batch-load all related entities
+    other_ids = [rid for rid in related_ids if rid != entity_id]
+    related_entity_map = get_entities_by_ids(conn, other_ids)
+
+    # Pre-load relations for the source entity (for rel_type lookup)
+    source_rels = get_relations_for_entity(conn, entity_id)
+    source_rel_map: dict[str, tuple[str, float]] = {}
+    for rel in source_rels:
+        other = rel["to_entity"] if rel["from_entity"] == entity_id else rel["from_entity"]
+        source_rel_map[other] = (rel["rel_type"], rel["weight"])
+
     # Build related entities list
     related = []
-    for rid in related_ids:
-        if rid == entity_id:
-            continue
-        rrow = get_entity(conn, rid)
+    for rid in other_ids:
+        rrow = related_entity_map.get(rid)
         if rrow is None:
             continue
-        rels = get_relations_for_entity(conn, entity_id)
-        rel_type = "RELATES_TO"
-        weight = 0.5
-        for rel in rels:
-            other = rel["to_entity"] if rel["from_entity"] == entity_id else rel["from_entity"]
-            if other == rid:
-                rel_type = rel["rel_type"]
-                weight = rel["weight"]
-                break
+        rel_type, weight = source_rel_map.get(rid, ("RELATES_TO", 0.5))
         related.append({
             "entity_id": rid,
             "name": rrow["name"],
@@ -252,11 +264,10 @@ def knowledge_trace(
 
     # Collect timeline: sort entities by first_seen date
     timeline_entities = [entity_row]
-    for rid in related_ids:
-        if rid != entity_id:
-            rrow = get_entity(conn, rid)
-            if rrow:
-                timeline_entities.append(rrow)
+    for rid in other_ids:
+        rrow = related_entity_map.get(rid)
+        if rrow:
+            timeline_entities.append(rrow)
 
     timeline = sorted(
         [{"date": e["first_seen"], "summary": e["summary"][:200]}
@@ -266,8 +277,8 @@ def knowledge_trace(
 
     # Collect decisions among related entities
     decisions = []
-    for rid in related_ids:
-        rrow = get_entity(conn, rid)
+    for rid in other_ids:
+        rrow = related_entity_map.get(rid)
         if rrow and rrow["type"] == "decision":
             decisions.append({
                 "date": rrow["last_seen"],
@@ -284,7 +295,7 @@ def knowledge_trace(
     try:
         log_access(conn, entity_id, "knowledge_trace", topic)
     except Exception:
-        pass
+        logger.warning("Failed to log access for %s", entity_id)
 
     return {
         "entity": entity_data,
@@ -312,13 +323,15 @@ def active_projects(
     project_rows = list_entities_by_type(conn, "project")
     active = [r for r in project_rows if r["last_seen"] >= cutoff]
 
+    # Pre-load all tasks once (instead of per-project query)
+    all_tasks = list_entities_by_type(conn, "task")
+
     projects = []
     for row in active:
         # Attach open task entities (tasks with same project in name/summary)
-        task_rows = list_entities_by_type(conn, "task")
         open_tasks = [
             t["summary"][:100]
-            for t in task_rows
+            for t in all_tasks
             if row["name"].lower() in (t["name"] + t["summary"]).lower()
         ][:5]
 
@@ -340,7 +353,7 @@ def active_projects(
         for p in projects:
             log_access(conn, p["entity_id"], "active_projects", "")
     except Exception:
-        pass
+        logger.warning("Failed to log access in active_projects")
 
     return {"projects": projects}
 
@@ -395,7 +408,7 @@ def preference_lookup(
         for p in preferences:
             log_access(conn, p["entity_id"], "preference_lookup", topic or "")
     except Exception:
-        pass
+        logger.warning("Failed to log access in preference_lookup")
 
     return {"preferences": preferences}
 
@@ -421,18 +434,43 @@ def decision_history(
         if topic_lower in (r["name"] + r["summary"]).lower()
     ]
 
+    # Pre-load all relations for matched decisions in one query
+    matched_ids = [r["id"] for r in matched]
+    all_rels = get_relations_for_entities(conn, matched_ids) if matched_ids else []
+    # Build a dict: entity_id -> list of (other_id, rel_type) for quick lookup
+    rel_map: dict[str, list[tuple[str, str]]] = {eid: [] for eid in matched_ids}
+    related_entity_ids: set[str] = set()
+    for rel in all_rels:
+        if rel["from_entity"] in rel_map:
+            other = rel["to_entity"]
+            rel_map[rel["from_entity"]].append((other, rel["rel_type"]))
+            related_entity_ids.add(other)
+        if rel["to_entity"] in rel_map:
+            other = rel["from_entity"]
+            rel_map[rel["to_entity"]].append((other, rel["rel_type"]))
+            related_entity_ids.add(other)
+
+    # Batch-load all related entities
+    related_entities = get_entities_by_ids(conn, list(related_entity_ids)) if related_entity_ids else {}
+
+    # Pre-load risk entities if needed
+    risk_by_topic: dict[str, str] = {}
+    if include_risk:
+        risk_rows = list_entities_by_type(conn, "risk")
+        for risk in risk_rows:
+            if topic_lower in (risk["name"] + risk["summary"]).lower():
+                risk_by_topic[risk["id"]] = risk["id"]
+
     decisions = []
     for r in matched:
         eid = r["id"]
 
-        # Collect related risks via relations
+        # Collect related risks via pre-loaded relations
         related_risks = []
         follow_up_tasks = []
 
-        rels = get_relations_for_entity(conn, eid)
-        for rel in rels:
-            other_id = rel["to_entity"] if rel["from_entity"] == eid else rel["from_entity"]
-            other = get_entity(conn, other_id)
+        for other_id, _rel_type in rel_map.get(eid, []):
+            other = related_entities.get(other_id)
             if other is None:
                 continue
             if other["type"] == "risk":
@@ -440,13 +478,11 @@ def decision_history(
             elif other["type"] == "task":
                 follow_up_tasks.append(other["id"])
 
-        # If include_risk, also search risks by topic
+        # If include_risk, add topic-matched risks
         if include_risk:
-            risk_rows = list_entities_by_type(conn, "risk")
-            for risk in risk_rows:
-                if topic_lower in (risk["name"] + risk["summary"]).lower():
-                    if risk["id"] not in related_risks:
-                        related_risks.append(risk["id"])
+            for risk_id in risk_by_topic:
+                if risk_id not in related_risks:
+                    related_risks.append(risk_id)
 
         decisions.append({
             "entity_id": eid,
@@ -462,7 +498,7 @@ def decision_history(
         for d in decisions:
             log_access(conn, d["entity_id"], "decision_history", topic)
     except Exception:
-        pass
+        logger.warning("Failed to log access in decision_history")
 
     return {"decisions": decisions}
 
@@ -538,6 +574,34 @@ def knowledge_stats(conn) -> dict:
             "distinct_values": len(set(round(s, 4) for s in scores)),
         }
 
+    # Gini coefficient for importance distribution (0=equal, 1=concentrated)
+    gini = 0.0
+    if scores and len(scores) > 1:
+        sorted_s = sorted(scores)
+        n_s = len(sorted_s)
+        cum = 0.0
+        for i, s in enumerate(sorted_s):
+            cum += (i + 1) * s
+        total = sum(sorted_s)
+        if total > 0:
+            gini = round((2 * cum / (n_s * total)) - (n_s + 1) / n_s, 4)
+
+    # Noise ratio: entities with importance < 0.3
+    noise_count = sum(1 for s in scores if s < 0.3)
+    noise_ratio = round(noise_count / total_entities, 4) if total_entities else 0.0
+
+    # Relation density by type
+    rel_density = {}
+    for etype, cnt in entity_counts.items():
+        type_rel_row = conn.execute(
+            """SELECT COUNT(*) as cnt FROM relations r
+               JOIN entities e ON (r.from_entity=e.id OR r.to_entity=e.id)
+               WHERE e.type=?""",
+            (etype,),
+        ).fetchone()
+        type_rels = type_rel_row["cnt"] if type_rel_row else 0
+        rel_density[etype] = round(type_rels / cnt, 2) if cnt else 0.0
+
     return {
         "entity_counts": entity_counts,
         "total_entities": total_entities,
@@ -545,10 +609,14 @@ def knowledge_stats(conn) -> dict:
         "relation_type_counts": relation_type_counts,
         "indexed_days": indexed_days,
         "last_consolidation": last_consolidation,
-        "embedding_model": "",
+        "embedding_model": os.environ.get("EMBEDDING_MODEL", ""),
         "db_size_mb": db_size_mb,
         # Quality metrics
         "orphan_entities": orphan_count,
         "avg_relations_per_entity": avg_relations,
         "importance_distribution": score_quartiles,
+        "gini_coefficient": gini,
+        "noise_ratio": noise_ratio,
+        "noise_entity_count": noise_count,
+        "relation_density_by_type": rel_density,
     }

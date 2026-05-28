@@ -97,9 +97,16 @@ def _shared_non_stopwords(
     e2: ExtractedEntity,
     min_shared: int = 2,
 ) -> list[str]:
-    """Return shared non-stopword tokens if count >= min_shared, else []."""
+    """Return shared non-stopword tokens if count >= min_shared, else [].
+
+    Filters out single-character tokens as they rarely carry meaningful
+    semantic signal for relation quality.
+    """
     tokens1 = set(_tokenize(e1.name + " " + e1.summary)) - _STOPWORDS
     tokens2 = set(_tokenize(e2.name + " " + e2.summary)) - _STOPWORDS
+    # Only keep tokens with 2+ characters (filters single CJK chars like 技,术,关,键)
+    tokens1 = {t for t in tokens1 if len(t) >= 2}
+    tokens2 = {t for t in tokens2 if len(t) >= 2}
     shared = tokens1 & tokens2
     return list(shared) if len(shared) >= min_shared else []
 
@@ -124,6 +131,26 @@ def link_entities_in_file(
     for e in entities:
         by_section.setdefault(e.section_title, []).append(e)
 
+    # Type pairs eligible for co_occurrence linking (avoid O(n²) noise)
+    # Only include pairs where co-occurrence implies semantic connection.
+    # tech/fact are too numerous and produce noise when cross-linked.
+    _CO_OCCURRENCE_PAIRS = {
+        # Core high-value types
+        frozenset({"decision", "risk"}),
+        frozenset({"decision", "project"}),
+        frozenset({"decision", "preference"}),
+        frozenset({"risk", "project"}),
+        frozenset({"risk", "preference"}),
+        frozenset({"project", "preference"}),
+        # Project/task/decision/risk links
+        frozenset({"project", "task"}),
+        frozenset({"decision", "task"}),
+        frozenset({"risk", "task"}),
+        # Idea links
+        frozenset({"idea", "project"}),
+        frozenset({"idea", "decision"}),
+    }
+
     # Same-section linking — semantic condition (name mention or shared tokens)
     for section_entities in by_section.values():
         if len(section_entities) <= 1:
@@ -134,25 +161,32 @@ def link_entities_in_file(
                     break
                 e1, e2 = section_entities[i], section_entities[j]
                 evidence = ""
+                weight = 0.5
                 if _has_name_mention(e1, e2):
                     evidence = "name_mention"
                 else:
                     shared = _shared_non_stopwords(e1, e2)
                     if shared:
                         evidence = "shared_tokens: " + ",".join(sorted(shared))
+                    else:
+                        # Co-occurrence fallback: only for high-value type pairs
+                        type_pair = frozenset({e1.type, e2.type})
+                        if type_pair in _CO_OCCURRENCE_PAIRS:
+                            evidence = "co_occurrence"
+                            weight = 0.3
                 if not evidence:
                     continue
                 rel = LinkedRelation(
                     id=generate_relation_id(e1.id, e2.id, "RELATES_TO"),
                     from_entity=e1.id, to_entity=e2.id,
-                    rel_type="RELATES_TO", weight=0.5,
+                    rel_type="RELATES_TO", weight=weight,
                     evidence=evidence,
                 )
                 insert_relation(conn, {
                     "id": rel.id, "from_entity": rel.from_entity,
                     "to_entity": rel.to_entity, "rel_type": rel.rel_type,
                     "weight": rel.weight, "evidence": rel.evidence,
-                })
+                }, auto_commit=False)
                 relations.append(rel)
             if len(relations) >= MAX_PER_FILE_RELATIONS:
                 break
@@ -197,7 +231,7 @@ def link_cross_day(
                 "rel_type": rel.rel_type,
                 "weight": rel.weight,
                 "evidence": rel.evidence,
-            })
+            }, auto_commit=False)
             relations.append(rel)
 
         if db_entity is not None:
@@ -222,14 +256,13 @@ def link_cross_day(
                     "rel_type": refines_rel.rel_type,
                     "weight": refines_rel.weight,
                     "evidence": refines_rel.evidence,
-                })
+                }, auto_commit=False)
                 relations.append(refines_rel)
 
             conn.execute(
                 "UPDATE entities SET day_count=?, last_seen=?, updated_at=datetime('now') WHERE id=?",
                 (new_day_count, entity.last_seen, entity.id),
             )
-            conn.commit()
         else:
             insert_entity(conn, {
                 "id": entity.id,
@@ -297,7 +330,7 @@ def link_project_dependencies(
                     "rel_type": rel.rel_type,
                     "weight": rel.weight,
                     "evidence": rel.evidence,
-                })
+                }, auto_commit=False)
                 relations.append(rel)
 
     return relations
@@ -348,7 +381,7 @@ def link_contradicts_in_file(
                             "id": rel.id, "from_entity": rel.from_entity,
                             "to_entity": rel.to_entity, "rel_type": rel.rel_type,
                             "weight": rel.weight, "evidence": rel.evidence,
-                        })
+                        }, auto_commit=False)
                         relations.append(rel)
                         break
     return relations

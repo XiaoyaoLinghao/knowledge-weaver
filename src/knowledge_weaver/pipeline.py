@@ -217,12 +217,16 @@ def _filter_unchanged(
     return to_process, to_skip
 
 
-def _find_similar_entity(conn, entity_type: str, name: str, threshold: float = 0.85) -> str | None:
+def _find_similar_entity(conn, entity_type: str, name: str, threshold: float = 0.85,
+                         embedder=None, summary: str = "") -> str | None:
     """Find an existing same-type entity with a highly similar name.
 
-    Returns the existing entity ID if found, None otherwise.
-    Only compares against entities first seen within the last 30 days to
-    keep the comparison set manageable.
+    Strategy:
+    1. SequenceMatcher on names (threshold >= 0.85)
+    2. If embedder available, also check embedding cosine similarity (>= 0.85)
+       for candidates where name similarity is between 0.70 and 0.85.
+
+    Only compares against entities first seen within the last 30 days.
     """
     from datetime import date, timedelta
     cutoff = (date.today() - timedelta(days=30)).isoformat()
@@ -230,12 +234,38 @@ def _find_similar_entity(conn, entity_type: str, name: str, threshold: float = 0
         "SELECT id, name FROM entities WHERE type=? AND first_seen >= ?",
         (entity_type, cutoff),
     ).fetchall()
+
     best_id, best_ratio = None, 0.0
+    borderline: list[tuple[str, float]] = []  # (id, ratio) for 0.70-0.85 range
+
     for row in rows:
         ratio = SequenceMatcher(None, name.lower(), row["name"].lower()).ratio()
-        if ratio > best_ratio:
-            best_ratio, best_id = ratio, row["id"]
-    return best_id if best_ratio >= threshold else None
+        if ratio >= threshold:
+            if ratio > best_ratio:
+                best_ratio, best_id = ratio, row["id"]
+        elif ratio >= 0.70:
+            borderline.append((row["id"], ratio))
+
+    if best_id:
+        return best_id
+
+    # Embedding-based second pass for borderline candidates
+    if embedder is not None and summary and borderline:
+        try:
+            query_vec = embedder.embed(summary[:500])
+            if not query_vec:
+                return None
+            from knowledge_weaver.db import search_entity_vectors
+            # Get top matches from vector search
+            vec_results = search_entity_vectors(conn, query_vec, limit=20)
+            vec_ids = {r["id"] for r in vec_results}
+            for bid, _ in borderline:
+                if bid in vec_ids:
+                    return bid
+        except Exception:
+            pass
+
+    return None
 
 
 def _process_file(
@@ -302,7 +332,10 @@ def _process_file(
         else:
             # Cross-day name similarity merge: if a same-type entity exists
             # with a highly similar name, merge into it instead of creating new.
-            merged_id = _find_similar_entity(conn, extracted.type, extracted.name)
+            merged_id = _find_similar_entity(
+                conn, extracted.type, extracted.name,
+                embedder=embedder, summary=extracted.summary,
+            )
             if merged_id:
                 logger.debug("Merging %s → %s (name similarity)", extracted.id, merged_id)
                 extracted = ExtractedEntity(
@@ -336,12 +369,29 @@ def _process_file(
         tag_count = len(tags) if isinstance(tags, list) else 0
         access_count = get_access_count(conn, extracted.id) if db_entity else 0
 
+        # Compute recent_day_count (days seen in last 30 days)
+        recent_day_count = new_day_count  # default fallback
+        if db_entity:
+            cutoff_30 = (today - __import__("datetime").timedelta(days=30)).isoformat()
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT date) as cnt FROM daily_manifest WHERE date >= ?",
+                (cutoff_30,),
+            ).fetchone()
+            if row:
+                # Approximate: assume entity seen on each manifest day since first_seen
+                first = max(db_entity["first_seen"], cutoff_30)
+                last = db_entity["last_seen"]
+                if first <= last:
+                    recent_day_count = min(new_day_count, row["cnt"])
+
         importance = scorer.calculate(
             days_since_last_seen=days_since,
             day_count=new_day_count,
             distinct_categories=1,  # one category per extraction
             tag_count=tag_count,
             access_count=access_count,
+            entity_type=extracted.type,
+            recent_day_count=recent_day_count,
         )
 
         entity_dict = {
@@ -356,7 +406,7 @@ def _process_file(
             "source_lines": extracted.source_lines,
             "metadata": json.dumps(extracted.metadata, ensure_ascii=False),
         }
-        insert_entity(conn, entity_dict)
+        insert_entity(conn, entity_dict, auto_commit=False)
         existing_ids.add(extracted.id)
         entity_count += 1
 
@@ -389,17 +439,18 @@ def _process_file(
     proj_relations = link_project_dependencies(conn, linker_entities)
     result.relations_created += len(proj_relations)
 
+    # Commit all entity and relation writes for this file in one batch
+    conn.commit()
+
     # Step 7b: Batch embed and store vectors
     if embedder is not None and texts_to_embed:
         try:
             vectors = embedder.embed_batch(texts_to_embed)
+            from knowledge_weaver.db import upsert_entity_vector
             for eid, vec in zip(entity_ids_to_embed, vectors):
                 if vec:  # skip empty results
                     try:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO entity_vectors(entity_id, embedding) VALUES (?, ?)",
-                            (eid, json.dumps(vec)),
-                        )
+                        upsert_entity_vector(conn, eid, vec, auto_commit=False)
                     except Exception:
                         pass  # vector table may not exist
             conn.commit()

@@ -10,17 +10,17 @@ class ImportanceScorer:
     """Calculates importance score for entities using multiple factors."""
 
     WEIGHTS: dict[str, float] = {
-        "freshness": 0.25,
-        "frequency": 0.25,
-        "diversity": 0.10,
-        "richness": 0.10,
+        "freshness": 0.15,
+        "frequency": 0.30,
+        "diversity": 0.05,
+        "richness": 0.05,
         "access": 0.10,
-        "type_base": 0.20,
+        "type_base": 0.35,
     }
 
     TYPE_BASE: dict[str, float] = {
-        "decision": 0.40, "risk": 0.30, "project": 0.25,
-        "preference": 0.20, "task": 0.10, "tech": 0.05,
+        "decision": 0.80, "risk": 0.60, "project": 0.50,
+        "preference": 0.40, "task": 0.15, "tech": 0.05,
         "fact": 0.0, "idea": 0.0,
     }
 
@@ -35,11 +35,17 @@ class ImportanceScorer:
         tag_count: int = 0,
         access_count: int = 0,
         entity_type: str = "fact",
+        recent_day_count: int | None = None,
     ) -> float:
-        """Calculate composite importance score."""
+        """Calculate composite importance score.
+
+        recent_day_count: days the entity appeared in the last 30 days.
+        If not provided, falls back to day_count for backward compatibility.
+        """
+        freq_input = recent_day_count if recent_day_count is not None else day_count
         score = (
             self.WEIGHTS["freshness"] * self.freshness(days_since_last_seen)
-            + self.WEIGHTS["frequency"] * self.frequency(day_count, days_since_last_seen)
+            + self.WEIGHTS["frequency"] * self.frequency(freq_input, days_since_last_seen)
             + self.WEIGHTS["diversity"] * self.diversity(distinct_categories)
             + self.WEIGHTS["richness"] * self.richness(tag_count)
             + self.WEIGHTS["access"] * self.access(access_count)

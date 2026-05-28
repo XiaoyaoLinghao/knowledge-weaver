@@ -109,6 +109,9 @@ _GARBAGE_NAMES = {
 
 _GARBAGE_NAME_MIN_LENGTH = 2
 
+# Time/duration descriptions that are not meaningful entities
+_DURATION_RE = re.compile(r'^[\d\-~至到]+[hHdDwW月年天周）)]?$|^[\d.]+\s*[hHdDwW月年天周]$')
+
 # File path pattern
 _FILE_PATH_PATTERN = re.compile(
     r"`?([a-zA-Z0-9_./\-]+\.[a-zA-Z]{1,10})`?"
@@ -325,7 +328,7 @@ def extract_decisions(text: str) -> list[dict]:
             content = m.group(1).strip()
             if not content:
                 continue
-            name = content[:80]
+            name = _compact_name(content, 40)
             eid = generate_entity_id("decision", name)
             results.append({
                 "id": eid,
@@ -344,7 +347,7 @@ def extract_preferences(text: str) -> list[dict]:
             content = m.group(1).strip()
             if not content:
                 continue
-            name = content[:80]
+            name = _compact_name(content, 40)
             eid = generate_entity_id("preference", name)
             results.append({
                 "id": eid,
@@ -362,9 +365,10 @@ def extract_risks(text: str) -> list[dict]:
         for m in pat.finditer(text):
             # Build name from matched groups
             groups = [g for g in m.groups() if g]
-            name = "：".join(g.strip() for g in groups if g.strip())[:80]
+            name = "：".join(g.strip() for g in groups if g.strip())[:40]
             if not name:
-                name = text[:60]
+                name = text[:30]
+            name = _compact_name(name, 40)
             eid = generate_entity_id("risk", name)
             results.append({
                 "id": eid,
@@ -385,7 +389,7 @@ def extract_tasks(text: str) -> list[dict]:
             content = m.group(1).strip()
             if not content:
                 continue
-            name = content[:80]
+            name = _compact_name(content, 40)
             eid = generate_entity_id("task", f"完成_{name}")
             results.append({
                 "id": eid,
@@ -401,7 +405,7 @@ def extract_tasks(text: str) -> list[dict]:
             content = m.group(1).strip()
             if not content:
                 continue
-            name = content[:80]
+            name = _compact_name(content, 40)
             eid = generate_entity_id("task", f"计划_{name}")
             results.append({
                 "id": eid,
@@ -451,6 +455,15 @@ def _is_garbage_name(name: str) -> bool:
         return True
     # Check if the name is purely punctuation/symbols
     if all(c in '（）()""''""【】[]{}，。！？、；：…·*' for c in stripped):
+        return True
+    # Pure numbers (e.g. "275", "3.14")
+    if stripped.replace('.', '').replace('-', '').isdigit():
+        return True
+    # Names starting with markdown formatting artifacts
+    if stripped.startswith('**') or stripped.startswith('：') or stripped.startswith('：'):
+        return True
+    # Duration descriptions like "1-2h）", "4-6周", "2h"
+    if _DURATION_RE.match(stripped):
         return True
     return False
 
@@ -514,10 +527,10 @@ def extract_entities_from_item(
 
     # If no entity found, create a default entity for the item
     name = _extract_entity_name(text, entity_type)
-    # Skip default entities that add no structure: if the name is just a
-    # prefix of the text, the "entity" is a truncated copy of the raw text.
-    text_prefix = text[:200]
-    if len(name) >= 4 and (name in text_prefix or _text_overlap_ratio(name, text_prefix) > 0.85):
+    # Skip default entities that add no structure: if the name is a long
+    # prefix of the text (name covers >80% of text), it's a redundant copy.
+    text_stripped = text.strip()
+    if len(name) >= 4 and name == text_stripped[:len(name)] and len(name) > len(text_stripped) * 0.8:
         return entities
     eid = generate_entity_id(entity_type, name)
     _add(eid, entity_type, name, text)
@@ -561,6 +574,24 @@ def _text_overlap_ratio(a: str, b: str) -> float:
     return len(set_a & set_b) / len(set_a)
 
 
+def _compact_name(raw: str, max_len: int = 40) -> str:
+    """Generate a concise entity name from raw text.
+
+    Truncates at the first clause boundary (。；，) within max_len.
+    If still too long, hard-truncates and adds ellipsis.
+    """
+    s = raw.strip()
+    # Try breaking at clause boundaries
+    for sep in ("。", "；", "，", ", ", "; "):
+        idx = s.find(sep)
+        if 4 < idx <= max_len:
+            s = s[:idx]
+            break
+    if len(s) > max_len:
+        s = s[:max_len - 1] + "…"
+    return s
+
+
 def _extract_entity_name(text: str, entity_type: str) -> str:
     """Extract a short meaningful name from text based on entity type."""
     # Try sentence patterns for decisions
@@ -568,14 +599,14 @@ def _extract_entity_name(text: str, entity_type: str) -> str:
         for pat in _DECISION_PATTERNS:
             m = pat.search(text)
             if m:
-                return m.group(1).strip()[:50]
+                return _compact_name(m.group(1).strip(), 30)
 
     # Preference patterns
     if entity_type == "preference":
         for pat in _PREFERENCE_PATTERNS:
             m = pat.search(text)
             if m:
-                return m.group(1).strip()[:50]
+                return _compact_name(m.group(1).strip(), 30)
 
     # Risk patterns
     if entity_type == "risk":
@@ -583,15 +614,15 @@ def _extract_entity_name(text: str, entity_type: str) -> str:
             m = pat.search(text)
             if m:
                 groups = [g for g in m.groups() if g and g.strip()]
-                return "：".join(g.strip() for g in groups)[:50]
+                return _compact_name("：".join(g.strip() for g in groups), 30)
 
     # Task patterns
     if entity_type == "task":
         for pat in _TASK_COMPLETED_PATTERNS + _TASK_TODO_PATTERNS:
             m = pat.search(text)
             if m:
-                return m.group(1).strip()[:50]
+                return _compact_name(m.group(1).strip(), 30)
 
-    # Default: first clause or first 50 chars
+    # Default: first clause or first 30 chars
     first = text.split("。")[0].split("；")[0].split("，")[0]
-    return first[:50]
+    return _compact_name(first, 30)

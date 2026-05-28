@@ -20,7 +20,7 @@ class TestEmbedderFromEnv:
         assert client.base_url == "https://api.example.com/v1"
         assert client.api_key == "sk-test-key-123"
         assert client.model == "BAAI/bge-large-zh-v1.5"
-        assert client.dimension == 2048
+        assert client.dimension == 1024
 
     def test_strips_trailing_slash_from_base_url(self, monkeypatch):
         monkeypatch.setenv("EMBEDDING_BASE_URL", "https://api.example.com/v1/")
@@ -208,13 +208,13 @@ class TestEmbedBatch:
 class TestEmbedDimension:
     """test_embed_dimension: verify dimension parameter handling."""
 
-    def test_default_dimension_is_2048(self):
+    def test_default_dimension_is_1024(self):
         client = EmbeddingClient(
             base_url="https://api.test.com/v1",
             api_key="sk-test",
             model="test-model",
         )
-        assert client.dimension == 2048
+        assert client.dimension == 1024
 
     def test_custom_dimension(self):
         client = EmbeddingClient(

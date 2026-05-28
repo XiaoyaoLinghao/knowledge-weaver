@@ -14,8 +14,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Default vector dimension for bge-large-zh-v1.5
-DEFAULT_DIMENSION = 2048  # doubao-embedding-vision
+# BGE-M3 native dimension
+DEFAULT_DIMENSION = 1024
 
 
 class EmbeddingClient:
@@ -24,6 +24,8 @@ class EmbeddingClient:
     Calls POST {base_url}/embeddings with Authorization: Bearer {api_key}
     and body {model, input: [...]}.
     """
+
+    MAX_BATCH_SIZE = 10
 
     def __init__(
         self,
@@ -38,6 +40,7 @@ class EmbeddingClient:
         self.model = model
         self.dimension = dimension
         self._client = httpx.Client(timeout=timeout)
+        self._is_local = "127.0.0.1" in base_url or "localhost" in base_url
 
     def embed(self, text: str) -> list[float]:
         """Embed a single text string.
@@ -46,8 +49,6 @@ class EmbeddingClient:
         """
         results = self.embed_batch([text])
         return results[0] if results else []
-
-    MAX_BATCH_SIZE = 10  # Volcengine limit
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed multiple texts, auto-splitting into API-compliant batch sizes."""
@@ -62,9 +63,10 @@ class EmbeddingClient:
                 all_results.extend([[] for _ in chunk])
             else:
                 all_results.extend(result)
-            if i + self.MAX_BATCH_SIZE < len(texts):
+            # Rate-limit only for remote APIs
+            if not self._is_local and i + self.MAX_BATCH_SIZE < len(texts):
                 import time
-                time.sleep(3.0)  # rate-limit: Volcengine free tier QPS
+                time.sleep(3.0)
         return all_results
 
     def _embed_chunk(self, texts: list[str]) -> list[list[float]]:
@@ -118,10 +120,18 @@ def get_embedder() -> EmbeddingClient | None:
     api_key = os.environ.get("EMBEDDING_API_KEY", "").strip()
     model = os.environ.get("EMBEDDING_MODEL", "").strip()
 
-    if not base_url or not api_key or not model:
+    is_local = base_url and ("127.0.0.1" in base_url or "localhost" in base_url)
+
+    if not base_url or not model:
         logger.debug(
             "Embedding not configured (need EMBEDDING_BASE_URL, "
-            "EMBEDDING_API_KEY, EMBEDDING_MODEL). Embeddings disabled."
+            "EMBEDDING_MODEL). Embeddings disabled."
+        )
+        return None
+
+    if not is_local and not api_key:
+        logger.debug(
+            "Remote embedding requires EMBEDDING_API_KEY. Embeddings disabled."
         )
         return None
 

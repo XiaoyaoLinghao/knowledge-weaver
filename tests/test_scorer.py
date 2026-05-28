@@ -69,11 +69,11 @@ class TestAccess:
 class TestTypeBase:
     def test_type_base_known_types(self):
         scorer = ImportanceScorer()
-        assert scorer.type_base("decision") == 0.40
-        assert scorer.type_base("risk") == 0.30
-        assert scorer.type_base("project") == 0.25
-        assert scorer.type_base("preference") == 0.20
-        assert scorer.type_base("task") == 0.10
+        assert scorer.type_base("decision") == 0.80
+        assert scorer.type_base("risk") == 0.60
+        assert scorer.type_base("project") == 0.50
+        assert scorer.type_base("preference") == 0.40
+        assert scorer.type_base("task") == 0.15
         assert scorer.type_base("tech") == 0.05
         assert scorer.type_base("fact") == 0.0
         assert scorer.type_base("idea") == 0.0
@@ -89,7 +89,7 @@ class TestTypeBase:
 
 class TestCalculateImportance:
     def test_calculate_importance_full(self):
-        """All factors maxed (day_count=14) → ~0.8756 (no ceiling)."""
+        """All factors maxed (day_count=14) with new weights."""
         scorer = ImportanceScorer()
         score = scorer.calculate(
             days_since_last_seen=0,
@@ -100,8 +100,8 @@ class TestCalculateImportance:
         )
         # freshness=1.0, frequency=log(15)/log(8)≈1.302, diversity=1.0,
         # richness=1.0, access=1.0, type_base("fact")=0.0
-        # = 0.25*1.0 + 0.25*1.302 + 0.10*1.0 + 0.10*1.0 + 0.10*1.0 + 0.20*0.0 = 0.8756
-        assert abs(score - 0.8756) < 0.01
+        # = 0.15*1.0 + 0.30*1.302 + 0.05*1.0 + 0.05*1.0 + 0.10*1.0 + 0.35*0.0 ≈ 0.7407
+        assert abs(score - 0.7407) < 0.01
 
     def test_calculate_importance_zero(self):
         """All factors at 0 → importance = 0.0"""
@@ -145,8 +145,8 @@ class TestCalculateImportance:
         scorer = ImportanceScorer()
         base = scorer.calculate(0, 7, 4, 5, 5)  # default entity_type="fact"
         decision = scorer.calculate(0, 7, 4, 5, 5, entity_type="decision")
-        # decision should be higher by 0.20 * (0.40 - 0.0) = 0.08
-        assert abs(decision - base - 0.08) < 0.01
+        # decision should be higher by 0.35 * (0.80 - 0.0) = 0.28
+        assert abs(decision - base - 0.28) < 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +162,10 @@ class TestScoreEntity:
             "tags": ["a", "b", "c", "d", "e"],
         }
         score = score_entity(entity, access_count=5, today=date(2026, 5, 25))
-        # freshness=1.0, frequency(7)=1.0, diversity=1.0, richness=1.0,
+        # freshness=1.0, frequency(7)≈1.0, diversity=1.0, richness=1.0,
         # access=1.0, type_base("fact")=0.0
-        # = 0.25+0.25+0.10+0.10+0.10+0.0 = 0.80
-        assert score == 0.80
+        # = 0.15+0.30+0.05+0.05+0.10+0.0 = 0.65
+        assert score == 0.65
 
     def test_score_entity_stale(self):
         entity = {
@@ -187,9 +187,9 @@ class TestScoreEntity:
             "type": "decision",
         }
         score = score_entity(entity, access_count=5, today=date(2026, 5, 25))
-        # Same as test_score_entity_basic but type_base("decision")=0.40
-        # = 0.80 + 0.20*0.40 = 0.88
-        assert score == 0.88
+        # Same as test_score_entity_basic but type_base("decision")=0.80
+        # = 0.65 + 0.35*0.80 = 0.93
+        assert score == 0.93
 
 
 # ---------------------------------------------------------------------------

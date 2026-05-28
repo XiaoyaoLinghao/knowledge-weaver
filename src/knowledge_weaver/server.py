@@ -1,7 +1,7 @@
 """Knowledge Weaver MCP Server entry point.
 
 Creates a FastMCP server that registers 7 tools (6 knowledge + 1 consolidate),
-reads environment variables for configuration, and supports CLI subcommands.
+3 resources, reads environment variables for configuration, and supports CLI subcommands.
 
 Usage:
     python -m knowledge_weaver.server           # serve via stdio (default)
@@ -60,12 +60,17 @@ def get_embedder():
     return _get()
 
 
+def _clamp(value: int, min_val: int, max_val: int) -> int:
+    """Clamp an integer value to [min_val, max_val]."""
+    return max(min_val, min(max_val, value))
+
+
 # ---------------------------------------------------------------------------
 # MCP Server creation
 # ---------------------------------------------------------------------------
 
 def create_server() -> FastMCP:
-    """Create and configure the MCP server with all 7 tools."""
+    """Create and configure the MCP server with all tools and resources."""
     mcp = FastMCP("knowledge-weaver")
 
     # --- Tool 1: knowledge_search ---
@@ -75,15 +80,25 @@ def create_server() -> FastMCP:
         entity_type: str = "",
         max_results: int = 10,
         min_score: float = 0.3,
+        offset: int = 0,
     ) -> str:
-        """Search knowledge entities semantically by query text.
+        """Search the structured knowledge base for entities by keyword or semantic similarity.
+
+        Use this tool when you need to find specific decisions, projects, risks, preferences,
+        or technical concepts that have been extracted from past conversations and daily memory
+        archives. This is NOT a general memory search — it searches a curated knowledge graph,
+        not raw text chunks. For exploring how topics connect to each other, use knowledge_trace
+        instead. For listing current projects, use active_projects.
 
         Args:
-            query: The search query text.
-            entity_type: Optional filter by entity type (project, decision, preference, etc).
-            max_results: Maximum number of results to return (default 10).
-            min_score: Minimum importance score threshold (default 0.3).
+            query: The search query text. Can be a keyword, phrase, or natural language question.
+            entity_type: Optional filter by entity type: project, decision, risk, preference, task, idea, tech, fact.
+            max_results: Maximum number of results to return (1-100, default 10).
+            min_score: Minimum importance score threshold (default 0.3). Lower values return more results.
+            offset: Number of results to skip for pagination (default 0).
         """
+        max_results = _clamp(max_results, 1, 100)
+        offset = max(0, offset)
         from knowledge_weaver.tools import knowledge_search as _search
         conn = _get_conn()
         try:
@@ -95,6 +110,10 @@ def create_server() -> FastMCP:
                 min_score=min_score,
                 embedder=get_embedder(),
             )
+            if offset > 0 and "results" in result:
+                result["results"] = result["results"][offset:]
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
         finally:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
@@ -102,16 +121,24 @@ def create_server() -> FastMCP:
     # --- Tool 2: knowledge_trace ---
     @mcp.tool()
     async def knowledge_trace(topic: str, max_depth: int = 2) -> str:
-        """Trace a topic's full timeline across all indexed days, including related entities and decisions.
+        """Trace a topic's relationship graph — how decisions, projects, risks, and preferences connect to each other.
+
+        Use this when you need to understand the CONTEXT around a topic: what decisions were made,
+        what they depend on, what risks they carry, and how they relate to other topics. This follows
+        entity relationships (RELATES_TO, CONTINUES, DEPENDS_ON, CONTRADICTS) to build a connected view.
+        For a simple keyword search, use knowledge_search instead.
 
         Args:
-            topic: The topic to trace.
-            max_depth: Maximum relation traversal depth (default 2).
+            topic: The topic to trace. Can be an entity name, partial name, or keyword.
+            max_depth: How many hops to follow in the relationship graph (1-5, default 2). Depth 1 shows direct connections; depth 2+ reveals indirect relationships.
         """
+        max_depth = _clamp(max_depth, 1, 5)
         from knowledge_weaver.tools import knowledge_trace as _trace
         conn = _get_conn()
         try:
             result = _trace(conn, topic=topic, max_depth=max_depth)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
         finally:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
@@ -119,15 +146,22 @@ def create_server() -> FastMCP:
     # --- Tool 3: active_projects ---
     @mcp.tool()
     async def active_projects(lookback_days: int = 14) -> str:
-        """List currently active projects with status and open tasks.
+        """List currently active projects — projects seen in recent daily memory archives.
+
+        Use this to get a high-level overview of what the user has been working on recently.
+        Each project includes its activity status and related open tasks. For detailed project
+        relationships, use knowledge_trace with the project name.
 
         Args:
-            lookback_days: How many days back to consider a project active (default 14).
+            lookback_days: How many days back to consider a project active (1-90, default 14).
         """
+        lookback_days = _clamp(lookback_days, 1, 90)
         from knowledge_weaver.tools import active_projects as _active
         conn = _get_conn()
         try:
             result = _active(conn, lookback_days=lookback_days)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
         finally:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
@@ -135,33 +169,54 @@ def create_server() -> FastMCP:
     # --- Tool 4: preference_lookup ---
     @mcp.tool()
     async def preference_lookup(topic: str = "", domain: str = "") -> str:
-        """Look up user preferences and habits, optionally filtered by topic or domain.
+        """Look up user preferences, habits, and stated preferences from past conversations.
+
+        Use this when you need to understand the user's preferred tools, coding style, workflow
+        habits, or any explicitly stated preferences. For decisions and their rationale, use
+        decision_history instead.
 
         Args:
-            topic: Optional topic filter.
+            topic: Optional topic filter (e.g., "editor", "language", "workflow").
             domain: Optional domain filter.
         """
         from knowledge_weaver.tools import preference_lookup as _lookup
         conn = _get_conn()
         try:
             result = _lookup(conn, topic=topic or None, domain=domain or None)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
         finally:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
 
     # --- Tool 5: decision_history ---
     @mcp.tool()
-    async def decision_history(topic: str, include_risk: bool = True) -> str:
-        """Query historical decisions and their rationale on a given topic.
+    async def decision_history(
+        topic: str,
+        include_risk: bool = True,
+        offset: int = 0,
+    ) -> str:
+        """Query historical decisions and their rationale on a specific topic.
+
+        Use this when you need to understand WHY something was decided, what alternatives were
+        considered, and what risks were identified. This returns the decision timeline with
+        rationale and optionally linked risks. For finding decisions by keyword without a specific
+        topic, use knowledge_search with entity_type="decision".
 
         Args:
             topic: The topic to search decisions for.
             include_risk: Whether to include related risks (default True).
+            offset: Number of results to skip for pagination (default 0).
         """
+        offset = max(0, offset)
         from knowledge_weaver.tools import decision_history as _history
         conn = _get_conn()
         try:
             result = _history(conn, topic=topic, include_risk=include_risk)
+            if offset > 0 and "decisions" in result:
+                result["decisions"] = result["decisions"][offset:]
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
         finally:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
@@ -169,11 +224,16 @@ def create_server() -> FastMCP:
     # --- Tool 6: knowledge_stats ---
     @mcp.tool()
     async def knowledge_stats() -> str:
-        """System status overview: entity counts, indexed days, DB size."""
+        """Knowledge base health check — entity counts by type, relation counts, indexed days, quality metrics.
+
+        Use this to diagnose whether the knowledge base is functioning properly, check data freshness,
+        or understand the distribution of knowledge types. Not needed for normal queries."""
         from knowledge_weaver.tools import knowledge_stats as _stats
         conn = _get_conn()
         try:
             result = _stats(conn)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
         finally:
             conn.close()
         return json.dumps(result, ensure_ascii=False)
@@ -190,11 +250,18 @@ def create_server() -> FastMCP:
         embedder = get_embedder()
         if embedder is None:
             return json.dumps({
-                "status": "error",
                 "error": "Embedding not configured. Set EMBEDDING_BASE_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL.",
+                "isError": True,
             }, ensure_ascii=False)
 
-        result = run_consolidation(DB_PATH, MEMORY_DIR, embedder)
+        try:
+            result = run_consolidation(DB_PATH, MEMORY_DIR, embedder)
+        except Exception as exc:
+            return json.dumps({
+                "error": str(exc),
+                "isError": True,
+            }, ensure_ascii=False)
+
         return json.dumps({
             "status": result.status,
             "files_processed": result.files_processed,
@@ -203,6 +270,49 @@ def create_server() -> FastMCP:
             "entities_updated": result.entities_updated,
             "errors": result.errors,
         }, ensure_ascii=False)
+
+    # --- Resources ---
+
+    @mcp.resource("knowledge://stats")
+    def stats_resource() -> str:
+        """System status as a resource."""
+        from knowledge_weaver.tools import knowledge_stats as _stats
+        conn = _get_conn()
+        try:
+            result = _stats(conn)
+        finally:
+            conn.close()
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    @mcp.resource("knowledge://entity/{entity_id}")
+    def entity_resource(entity_id: str) -> str:
+        """Individual entity details by ID."""
+        from knowledge_weaver.db import get_entity, get_relations_for_entity
+        conn = _get_conn()
+        try:
+            entity = get_entity(conn, entity_id)
+            if entity is None:
+                return json.dumps({"error": "Entity not found"}, ensure_ascii=False)
+            result = dict(entity)
+            rels = get_relations_for_entity(conn, entity_id)
+            result["relations"] = [dict(r) for r in rels]
+        finally:
+            conn.close()
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str)
+
+    @mcp.resource("knowledge://days/{date}")
+    def day_resource(date: str) -> str:
+        """Daily manifest entry by date (YYYY-MM-DD)."""
+        from knowledge_weaver.db import get_manifest, list_entities_by_type
+        conn = _get_conn()
+        try:
+            manifest = get_manifest(conn, date)
+            if manifest is None:
+                return json.dumps({"error": "No manifest for this date"}, ensure_ascii=False)
+            result = dict(manifest)
+        finally:
+            conn.close()
+        return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
     return mcp
 
