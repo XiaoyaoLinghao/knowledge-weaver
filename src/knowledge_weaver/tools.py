@@ -12,7 +12,7 @@ import difflib
 import json
 import logging
 import os
-from collections import deque
+from collections import defaultdict, deque
 from typing import Any
 
 from knowledge_weaver.db import (
@@ -174,7 +174,6 @@ def knowledge_search(
     all_candidate_ids = [c.get("id", "") for c in candidates_slice if c.get("id")]
     batch_rels = get_relations_for_entities(conn, all_candidate_ids)
     # Build eid -> [related_rels] map
-    from collections import defaultdict
     rels_by_eid: dict[str, list] = defaultdict(list)
     for rel in batch_rels:
         rels_by_eid[rel["from_entity"]].append(rel)
