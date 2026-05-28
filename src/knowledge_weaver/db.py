@@ -8,7 +8,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DIMENSION = 2560
+# fix: unified from embedder module — production vectors are 1024-dim
+from knowledge_weaver.embedder import DEFAULT_DIMENSION
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entities (
