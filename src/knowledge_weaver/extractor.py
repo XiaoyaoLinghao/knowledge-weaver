@@ -127,7 +127,7 @@ def _strip_verb_prefix(name: str) -> str:
     invalid, and the caller should skip the match.
     """
     for v in _PROJECT_VERB_PREFIXES:
-        if name.startswith(v) and len(name) > len(v) + 1:
+        if name.startswith(v) and len(name) > len(v):
             return name[len(v):]
     return name
 
