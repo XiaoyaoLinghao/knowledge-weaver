@@ -72,14 +72,16 @@ The 8 recognized section headings map to entity types:
 
 ## Memory File Specification
 
-This server reads memory files following [Memory File Specification v1.0](docs/KW_MEMORY_FILE_SPEC.md).
+This server reads memory files following [Memory File Specification v1.1](docs/KW_MEMORY_FILE_SPEC.md).
 Any agent producing input for this server (DMA, Hermes, custom skills) must conform to that spec.
 
 Key points:
 - File name: `YYYY-MM-DD.md`
 - YAML frontmatter with `title` / `date` (recommended)
-- 8 core categories + 1 extension category (strict string match)
+- 8 core categories + 1 extension category (used in `### 原始细节` subsection)
+- 9 entity tags in `### 摘要` subsection (v1.1)
 - Failure placeholders use `*<AGENT>-ERR: <reason>*` format
+- **KW MUST NOT index MEMORY.md or other manually-maintained files** (v1.1 §11)
 
 See the spec for full details.
 
