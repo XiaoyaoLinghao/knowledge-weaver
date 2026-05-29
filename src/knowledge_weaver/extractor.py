@@ -26,6 +26,25 @@ CATEGORY_TO_TYPE: dict[str, str] = {
     "关键讨论": "fact",  # KW SPEC v1.0 §4.2 extension category
 }
 
+# v1.1: Tag → entity type (must stay in sync with parser.py TAG_TO_TYPE)
+TAG_TO_TYPE: dict[str, str] = {
+    "关键决策": "decision",
+    "关键偏好": "preference",
+    "关键事实": "fact",
+    "关键风险": "risk",
+    "关键技术": "tech",
+    "已完成": "task",
+    "待办": "task",
+    "创意": "idea",
+    "关键讨论": "fact",
+}
+
+# v1.1: Task status mapping for task-type tags
+TAG_TO_TASK_STATUS: dict[str, str] = {
+    "已完成": "completed",
+    "待办": "todo",
+}
+
 # Type prefix mapping for entity IDs
 TYPE_PREFIX: dict[str, str] = {
     "project": "proj",
@@ -550,7 +569,17 @@ def extract_entities_from_item(
     if _is_garbage(text):
         return []
     source_ref = f"{source_file}:{item.line_start}:{item.line_end}"
-    entity_type = CATEGORY_TO_TYPE.get(category, "fact")
+
+    # v1.1: tag-driven type takes priority over category
+    item_tag = getattr(item, "tag", None)
+    if item_tag is not None and item_tag in TAG_TO_TYPE:
+        entity_type = TAG_TO_TYPE[item_tag]
+    else:
+        entity_type = CATEGORY_TO_TYPE.get(category, "fact")
+
+    # v1.1: task status from tag
+    task_status_override: str | None = TAG_TO_TASK_STATUS.get(item_tag) if item_tag else None
+
     seen_ids: set[str] = set()
     entities: list[ExtractedEntity] = []
 
@@ -598,13 +627,16 @@ def extract_entities_from_item(
     # Skip default entities that add no structure: if the name is a long
     # prefix of the text (name covers >80% of text), it's a redundant copy.
     text_stripped = text.strip()
-    if len(name) >= 4 and name == text_stripped[:len(name)] and len(name) > len(text_stripped) * 0.8:
+    if item_tag is None and len(name) >= 4 and name == text_stripped[:len(name)] and len(name) > len(text_stripped) * 0.8:
         return entities
     # For tech type, reject fallback names that look like sentence fragments
     if entity_type == "tech" and not _looks_like_tech_term(name):
         return entities
     eid = generate_entity_id(entity_type, name)
-    _add(eid, entity_type, name, text)
+    if task_status_override is not None and entity_type == "task":
+        _add(eid, entity_type, name, text, status=task_status_override)
+    else:
+        _add(eid, entity_type, name, text)
 
     return entities
 
@@ -616,16 +648,17 @@ def extract_entities_from_section(
 ) -> list[ExtractedEntity]:
     """Extract entities from a parsed section using rules.
 
-    Section has a single category. Iterates all items, deduplicating by entity ID.
-    dma_category: the original DMA category name (e.g. "核心要点"), used to determine
-    the primary entity type. Defaults to section.category if not provided.
+    v1.1: items with skip_extraction=True are bypassed (raw detail subsection
+    content; cloud summary will provide higher-quality entities).
     """
     all_entities: list[ExtractedEntity] = []
     seen_ids: set[str] = set()
-
     cat = dma_category if dma_category else section.category
 
     for item in section.items:
+        # v1.1: skip items flagged as raw-detail (### 原始细节)
+        if getattr(item, "skip_extraction", False):
+            continue
         item_entities = extract_entities_from_item(item, cat, source_file)
         for entity in item_entities:
             if entity.id in seen_ids:

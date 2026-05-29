@@ -27,14 +27,49 @@ _TIMESTAMP_RE = re.compile(r"^(\d{1,2}:\d{2}(?::\d{2})?)\s*[-–—]\s*")
 # Regex for YAML frontmatter
 _FRONTMATTER_RE = re.compile(r"^---\s*$")
 
+# ---------------------------------------------------------------------------
+# v1.1: H3 subsection markers
+# ---------------------------------------------------------------------------
+
+# H3 标题用于区分"原始细节"与"摘要"两类子分区
+_RAW_SUBSECTION_TITLES = frozenset({
+    "原始细节", "original", "raw",
+})
+_SUMMARY_SUBSECTION_TITLES = frozenset({
+    "摘要", "summary", "digest",
+})
+
+# H3 标题正则：### <title>
+_H3_RE = re.compile(r"^###\s+(.+)$")
+
+# Tag 行正则：[<tag>] <content>
+_TAG_RE = re.compile(r"^\[([^\]]+)\]\s+(.+)$")
+
+# Tag 字符串 → KW 实体类型映射（**必须与 extractor.py 中 TAG_TO_TYPE 保持同步**）
+# 修改本表时同步修改 docs/KW_MEMORY_FILE_SPEC.md §4.4
+TAG_TO_TYPE: dict[str, str] = {
+    "关键决策": "decision",
+    "关键偏好": "preference",
+    "关键事实": "fact",
+    "关键风险": "risk",
+    "关键技术": "tech",
+    "已完成": "task",
+    "待办": "task",
+    "创意": "idea",
+    "关键讨论": "fact",
+}
+
 
 @dataclass
 class ParsedItem:
-    """A single bullet item within a section."""
+    """A single bullet item or tag item within a section."""
     text: str
     time: str | None  # extracted timestamp like "09:30" or "09:30:45"
     line_start: int   # 1-indexed
     line_end: int     # 1-indexed
+    # v1.1 fields below (defaults preserve v1.0 behavior)
+    skip_extraction: bool = False   # True if inside `### 原始细节` subsection
+    tag: str | None = None          # Tag name (e.g. "关键决策") if from `[Tag]` line
 
 
 @dataclass
@@ -125,23 +160,23 @@ _CATEGORY_MARKER_RE = re.compile(r"^\*\*(.+?)\*\*$")
 def _parse_body(lines: list[str], start: int) -> list[ParsedSection]:
     """Parse sections and items from the body of the document.
 
-    Supports two DMA file formats:
+    Supports v1.0 Format A/B and v1.1 H3-subsection format.
 
-    Format A (simplified / fixture):
-      ## 核心要点          ← category heading
-      - item 1
-      ## 决策与结论        ← category heading
-      - item 2
+    State machine:
+      subsection_mode = "default" / "raw" / "summary"
 
-    Format B (real DMA):
-      ## 00:30             ← time slot
-      **核心要点**         ← category marker (bold)
-      - item 1
-      **决策与结论**       ← next category marker
-      - item 2
+    - "default": v1.0 behavior — `**xxx**` is category marker
+    - "raw":     items still parsed but flagged skip_extraction=True
+                 (entered on `### 原始细节` / `### original` / `### raw`)
+    - "summary": `**xxx**` IGNORED; only `[Tag]` lines become items with tag
+                 (entered on `### 摘要` / `### summary` / `### digest`)
+
+    `## HH:MM` time slot resets subsection_mode to "default".
+    Other `## heading` and unknown `### heading` also reset to "default".
     """
     sections: list[ParsedSection] = []
     current_category: str = "fact"
+    subsection_mode: str = "default"
     i = start
 
     while i < len(lines):
@@ -153,26 +188,69 @@ def _parse_body(lines: list[str], start: int) -> list[ParsedSection]:
             i += 1
             continue
 
-        # Detect ## heading: could be time slot (HH:MM) or category name
+        # ---- v1.1: H3 subsection marker (### foo) ----
+        h3_match = _H3_RE.match(stripped)
+        if h3_match:
+            sub_title = h3_match.group(1).strip()
+            if sub_title in _RAW_SUBSECTION_TITLES:
+                subsection_mode = "raw"
+            elif sub_title in _SUMMARY_SUBSECTION_TITLES:
+                subsection_mode = "summary"
+            else:
+                subsection_mode = "default"
+            i += 1
+            continue
+
+        # ---- H2 heading: time slot or category ----
         heading_match = re.match(r"^##\s+(.+)$", stripped)
         if heading_match:
             heading = heading_match.group(1).strip()
             mapped = DMA_CATEGORY_MAP.get(heading)
             if mapped is not None:
-                # Format A: ## 核心要点 — heading IS the category
+                # Format A: ## 核心要点
                 current_category = mapped
                 sections.append(ParsedSection(title=heading, category=mapped))
             elif re.match(r"^\d{1,2}:\d{2}", heading):
-                # Format B: ## 00:30 — time slot marker, reset category
+                # Format B: ## 10:00 — time slot, reset everything
                 current_category = "fact"
+                subsection_mode = "default"
             else:
-                # Unknown heading → treat as custom section with fact category
+                # Unknown H2: treat as custom section
                 current_category = "fact"
                 sections.append(ParsedSection(title=heading, category="fact"))
             i += 1
             continue
 
-        # Detect category marker: **核心要点** or **决策与结论** (Format B)
+        # ---- v1.1: in summary subsection, look for [Tag] lines ----
+        if subsection_mode == "summary":
+            tag_match = _TAG_RE.match(stripped)
+            if tag_match:
+                tag_name = tag_match.group(1).strip()
+                tag_text = tag_match.group(2).strip()
+                mapped_type = TAG_TO_TYPE.get(tag_name)
+                if mapped_type is not None:
+                    # Find or create section for this category
+                    target = None
+                    for s in reversed(sections):
+                        if s.category == mapped_type:
+                            target = s
+                            break
+                    if target is None:
+                        title_list = [k for k, v in DMA_CATEGORY_MAP.items() if v == mapped_type]
+                        target = ParsedSection(
+                            title=title_list[0] if title_list else mapped_type,
+                            category=mapped_type,
+                        )
+                        sections.append(target)
+                    item, end_i = _parse_tag_item(lines, i, tag_text, tag_name)
+                    target.items.append(item)
+                    i = end_i + 1
+                    continue
+            # Non-tag content in summary subsection: skip (narrative paragraphs)
+            i += 1
+            continue
+
+        # ---- Category marker (**xxx**) — only in default/raw modes ----
         cat_match = _CATEGORY_MARKER_RE.match(stripped)
         if cat_match:
             candidate = cat_match.group(1).strip()
@@ -183,23 +261,25 @@ def _parse_body(lines: list[str], start: int) -> list[ParsedSection]:
             i += 1
             continue
 
-        # Detect bullet item: - content
+        # ---- Bullet item ----
         if stripped.startswith("- "):
-            # Attach to last section with matching category
             target = None
             for s in reversed(sections):
                 if s.category == current_category:
                     target = s
                     break
             if target is None:
-                title = [k for k, v in DMA_CATEGORY_MAP.items() if v == current_category]
+                title_list = [k for k, v in DMA_CATEGORY_MAP.items() if v == current_category]
                 target = ParsedSection(
-                    title=title[0] if title else current_category,
+                    title=title_list[0] if title_list else current_category,
                     category=current_category,
                 )
                 sections.append(target)
 
             item, end_i = _parse_item(lines, i)
+            # v1.1: items in raw subsection are not extracted as entities
+            if subsection_mode == "raw":
+                item.skip_extraction = True
             target.items.append(item)
             i = end_i + 1
             continue
@@ -248,6 +328,47 @@ def _parse_item(lines: list[str], start: int) -> tuple[ParsedItem, int]:
         time=time_str,
         line_start=start + 1,  # 1-indexed
         line_end=end_i + 1,    # 1-indexed
+    ), end_i
+
+
+def _parse_tag_item(
+    lines: list[str], start: int, initial_text: str, tag_name: str,
+) -> tuple[ParsedItem, int]:
+    """Parse a tag-line item (v1.1 `### 摘要` subsection format).
+
+    Input line (already stripped) has form:
+        [<tag_name>] <initial_text>
+
+    Continuation lines (indented) are joined into text.
+
+    Returns (ParsedItem with tag=tag_name, last_line_index_inclusive).
+    """
+    raw_text = initial_text
+    end_i = start
+    j = start + 1
+    while j < len(lines):
+        next_line = lines[j]
+        # Continuation: indented non-blank line
+        if next_line and (next_line[0] in (" ", "\t")) and next_line.strip():
+            stripped_next = next_line.strip()
+            # Stop if it looks like a new tag, bullet, or heading
+            if (stripped_next.startswith("- ")
+                    or _TAG_RE.match(stripped_next)
+                    or re.match(r"^##+\s+", stripped_next)):
+                break
+            raw_text += " " + stripped_next
+            end_i = j
+            j += 1
+        else:
+            break
+
+    return ParsedItem(
+        text=raw_text,
+        time=None,
+        line_start=start + 1,
+        line_end=end_i + 1,
+        skip_extraction=False,
+        tag=tag_name,
     ), end_i
 
 

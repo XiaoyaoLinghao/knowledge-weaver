@@ -287,3 +287,80 @@ def test_dma_error_pattern_does_not_match_normal_text():
         long_text = s + " " + ("x" * 20)
         pat = re.compile(r".*-ERR:.*")
         assert not pat.match(long_text), f"-ERR: rule false positive: {long_text!r}"
+
+
+# ---------------------------------------------------------------------------
+# v1.1 tag-driven extraction tests
+# ---------------------------------------------------------------------------
+
+def test_v11_tag_to_type_complete():
+    from knowledge_weaver.extractor import TAG_TO_TYPE
+    expected = {
+        "关键决策": "decision", "关键偏好": "preference",
+        "关键事实": "fact", "关键风险": "risk",
+        "关键技术": "tech", "已完成": "task",
+        "待办": "task", "创意": "idea", "关键讨论": "fact",
+    }
+    assert TAG_TO_TYPE == expected
+
+
+def test_v11_tag_to_type_in_sync_with_parser():
+    """parser.py 与 extractor.py 中 TAG_TO_TYPE 必须完全一致。"""
+    from knowledge_weaver.parser import TAG_TO_TYPE as P_TAGS
+    from knowledge_weaver.extractor import TAG_TO_TYPE as E_TAGS
+    assert P_TAGS == E_TAGS
+
+
+def test_v11_skip_extraction_honored():
+    """skip_extraction=True 的 item 不应产生任何实体。"""
+    from knowledge_weaver.parser import ParsedSection, ParsedItem
+    from knowledge_weaver.extractor import extract_entities_from_section
+
+    s = ParsedSection(title="核心要点", category="fact")
+    s.items.append(ParsedItem(
+        text="决定采用 PostgreSQL 17 作为生产数据库",
+        time=None, line_start=1, line_end=1,
+        skip_extraction=True,
+    ))
+    ents = extract_entities_from_section(s, "test.md", dma_category="核心要点")
+    assert ents == []
+
+
+def test_v11_tag_overrides_category_type():
+    """item.tag 应覆盖 section category 决定实体类型。"""
+    from knowledge_weaver.parser import ParsedItem
+    from knowledge_weaver.extractor import extract_entities_from_item
+
+    item = ParsedItem(
+        text="后端框架：Python FastAPI",
+        time=None, line_start=1, line_end=1,
+        tag="关键决策",
+    )
+    ents = extract_entities_from_item(item, "fact", "test.md")
+    assert any(e.type == "decision" for e in ents), \
+        f"expected at least one decision entity, got {[e.type for e in ents]}"
+
+
+def test_v11_task_status_from_tag():
+    """[已完成] tag 应设置 status=completed；[待办] 应设置 status=todo。"""
+    from knowledge_weaver.parser import ParsedItem
+    from knowledge_weaver.extractor import extract_entities_from_item
+
+    item_done = ParsedItem(
+        text="完成 ExampleProject 登录模块",
+        time=None, line_start=1, line_end=1,
+        tag="已完成",
+    )
+    ents = extract_entities_from_item(item_done, "fact", "test.md")
+    task_ents = [e for e in ents if e.type == "task"]
+    assert any(e.metadata.get("status") == "completed" for e in task_ents), \
+        f"no task with status=completed in {[(e.type, e.metadata) for e in ents]}"
+
+    item_todo = ParsedItem(
+        text="接入 OAuth2 集成",
+        time=None, line_start=1, line_end=1,
+        tag="待办",
+    )
+    ents = extract_entities_from_item(item_todo, "fact", "test.md")
+    task_ents = [e for e in ents if e.type == "task"]
+    assert any(e.metadata.get("status") == "todo" for e in task_ents)

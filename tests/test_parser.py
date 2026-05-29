@@ -282,3 +282,149 @@ date: 2026-05-28
     cats_with_items = [(s.title, s.category, len(s.items)) for s in p.sections if s.items]
     assert any(t == "关键讨论" and c == "fact" and n >= 1 for t, c, n in cats_with_items), \
         f"关键讨论 not recognized as fact: {cats_with_items}"
+
+
+# ---------------------------------------------------------------------------
+# v1.1 H3 subsection + tag-based extraction tests
+# ---------------------------------------------------------------------------
+
+def test_v11_raw_subsection_marks_skip_extraction():
+    """### 原始细节 子分区内的 bullet 应该 skip_extraction=True。"""
+    from knowledge_weaver.parser import parse_dma_content
+    content = """---
+title: t
+date: 2026-05-29
+---
+
+## 10:00
+
+### 原始细节
+
+**核心要点**
+- 09:30 - 用户：决定采用 Python
+
+### 摘要
+
+[关键决策] 后端框架：Python FastAPI
+"""
+    p = parse_dma_content(content)
+
+    raw_items = [it for s in p.sections for it in s.items if it.skip_extraction]
+    tag_items = [it for s in p.sections for it in s.items if it.tag]
+
+    assert len(raw_items) == 1, f"expected 1 raw item, got {len(raw_items)}"
+    assert "决定采用 Python" in raw_items[0].text
+    assert len(tag_items) == 1, f"expected 1 tag item, got {len(tag_items)}"
+    assert tag_items[0].tag == "关键决策"
+    assert "Python FastAPI" in tag_items[0].text
+
+
+def test_v11_tag_to_type_table_complete():
+    """TAG_TO_TYPE 表必须有完整的 9 个 tag 映射。"""
+    from knowledge_weaver.parser import TAG_TO_TYPE
+
+    expected = {
+        "关键决策": "decision",
+        "关键偏好": "preference",
+        "关键事实": "fact",
+        "关键风险": "risk",
+        "关键技术": "tech",
+        "已完成": "task",
+        "待办": "task",
+        "创意": "idea",
+        "关键讨论": "fact",
+    }
+    assert TAG_TO_TYPE == expected, f"TAG_TO_TYPE mismatch: {TAG_TO_TYPE}"
+
+
+def test_v11_tag_continuation_lines_merged():
+    """带缩进续行的 tag 行应合并到一个 ParsedItem。"""
+    from knowledge_weaver.parser import parse_dma_content
+    content = """## 10:00
+
+### 摘要
+
+[关键决策] 后端框架：Python FastAPI
+  理由：原生 async 支持
+  其它候选：Django 已排除
+"""
+    p = parse_dma_content(content)
+    tags = [it for s in p.sections for it in s.items if it.tag]
+    assert len(tags) == 1
+    text = tags[0].text
+    assert "Python FastAPI" in text
+    assert "原生 async" in text
+    assert "Django" in text
+
+
+def test_v11_backward_compatible_with_v10():
+    """v1.0 扁平格式（无 H3 子分区）必须仍能正确解析。"""
+    from knowledge_weaver.parser import parse_dma_content
+    content = """---
+title: t
+date: 2026-05-28
+---
+
+## 10:00
+
+**核心要点**
+- 09:30 - 用户使用 macOS
+
+**决策与结论**
+- 决定采用 Python
+"""
+    p = parse_dma_content(content)
+    fact_sections = [s for s in p.sections if s.category == "fact"]
+    decision_sections = [s for s in p.sections if s.category == "decision"]
+    assert any(len(s.items) >= 1 for s in fact_sections)
+    assert any(len(s.items) >= 1 for s in decision_sections)
+
+    # 所有 items 应该都没有 v1.1 标记
+    for s in p.sections:
+        for it in s.items:
+            assert it.skip_extraction is False
+            assert it.tag is None
+
+
+def test_v11_unknown_h3_falls_back_to_default():
+    """未识别的 ### 标题应回退到 v1.0 default 模式，仍解析 **xxx** 和 bullet。"""
+    from knowledge_weaver.parser import parse_dma_content
+    content = """## 10:00
+
+### 自定义未知段名
+
+**核心要点**
+- bullet 1
+"""
+    p = parse_dma_content(content)
+    fact = [s for s in p.sections if s.category == "fact"]
+    assert any(len(s.items) >= 1 for s in fact)
+    # bullet 不应被标记 skip_extraction
+    for s in p.sections:
+        for it in s.items:
+            assert it.skip_extraction is False
+
+
+def test_v11_time_slot_resets_subsection_mode():
+    """新的 ## HH:MM 时间槽必须重置 subsection_mode 到 default。"""
+    from knowledge_weaver.parser import parse_dma_content
+    content = """## 10:00
+
+### 原始细节
+
+**核心要点**
+- raw 1
+
+## 14:00
+
+**核心要点**
+- 14 点之后的 bullet 不应被 skip_extraction
+"""
+    p = parse_dma_content(content)
+    items = []
+    for s in p.sections:
+        for it in s.items:
+            items.append((it.text, it.skip_extraction))
+
+    assert ("raw 1", True) in items
+    assert ("14 点之后的 bullet 不应被 skip_extraction", False) in items

@@ -281,3 +281,57 @@ def test_empty_parse_does_not_lock_manifest(temp_db_path, tmp_path):
     r2 = run_consolidation(temp_db_path, str(tmp_path), embedder=None)
     assert r2.files_skipped == 0
     assert r2.files_processed == 1
+
+
+def test_v11_end_to_end_h3_subsection_extraction(temp_db_path, tmp_path):
+    """端到端：模拟 DMA v1.1 输出，跑 KW consolidation，验证实体抽取正确。"""
+    from knowledge_weaver.pipeline import run_consolidation
+    import sqlite3
+
+    src = tmp_path / "agent_x"
+    src.mkdir()
+    (src / "2026-05-29.md").write_text("""---
+title: "2026-05-29 test"
+date: "2026-05-29"
+---
+
+## 10:00
+
+### 原始细节
+
+**核心要点**
+- 09:30 - 用户：我使用 macOS
+
+**决策与结论**
+- 09:45 - 决定采用 Python
+
+### 摘要
+
+今天用户决定采用 Python 作为后端语言。
+
+[关键决策] 后端框架：Python FastAPI（用户原话："决定用 FastAPI"）
+[关键偏好] 编辑器：vim
+[关键风险] 数据库连接池可能耗尽
+[已完成] 完成登录模块单元测试
+[待办] 接入 OAuth2
+""", encoding="utf-8")
+
+    result = run_consolidation(
+        db_path=temp_db_path,
+        memory_dirs=[("agent_x", str(src))],
+        embedder=None,
+    )
+    assert result.status == "ok"
+    assert result.files_processed == 1
+
+    c = sqlite3.connect(temp_db_path); c.row_factory = sqlite3.Row
+    types = {r["type"]: r["cnt"] for r in c.execute(
+        "SELECT type, COUNT(*) cnt FROM entities GROUP BY type")}
+    c.close()
+
+    assert types.get("decision", 0) >= 1, f"missing decision: {types}"
+    assert types.get("preference", 0) >= 1, f"missing preference: {types}"
+    assert types.get("risk", 0) >= 1, f"missing risk: {types}"
+    assert types.get("task", 0) >= 2, f"expected >= 2 tasks: {types}"
+    assert types.get("decision", 0) <= 2, \
+        f"too many decisions, raw subsection may not be skipped: {types}"
