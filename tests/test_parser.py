@@ -164,7 +164,7 @@ def test_parse_sample_file():
 # ---------------------------------------------------------------------------
 
 def test_parse_dma_structure():
-    """Verify the 8 DMA categories are recognized and mapped correctly."""
+    """Verify the DMA categories are recognized and mapped correctly."""
     content = (
         "---\ntitle: test\ndate: '2026-05-24'\n---\n"
         "## 核心要点\n- 09:00 - a\n\n"
@@ -174,12 +174,13 @@ def test_parse_dma_structure():
         "## 用户偏好与习惯\n- 13:00 - e\n\n"
         "## 技术/项目要点\n- 14:00 - f\n\n"
         "## 风险与注意事项\n- 15:00 - g\n\n"
-        "## 创意与想法\n- 16:00 - h\n"
+        "## 创意与想法\n- 16:00 - h\n\n"
+        "## 关键讨论\n- 17:00 - i\n"
     )
     result = parse_dma_content(content)
 
     section_map = {s.title: s for s in result.sections}
-    assert len(result.sections) == 8
+    assert len(result.sections) == 9
 
     for title, expected_cat in DMA_CATEGORY_MAP.items():
         assert title in section_map, f"Missing section: {title}"
@@ -262,3 +263,22 @@ def test_parse_all_three_fixtures():
         assert len(result.sections) == 8, f"{filename}: expected 8 sections, got {len(result.sections)}"
         for section in result.sections:
             assert len(section.items) > 0, f"{filename}: section '{section.title}' has no items"
+
+
+def test_parser_maps_key_discussion_to_fact():
+    """KW SPEC v1.0 §4.2: 关键讨论 must map to fact category."""
+    from knowledge_weaver.parser import parse_dma_content
+    content = """---
+title: t
+date: 2026-05-28
+---
+
+## 10:00
+
+**关键讨论**
+- 讨论了 A 和 B 的差异
+"""
+    p = parse_dma_content(content)
+    cats_with_items = [(s.title, s.category, len(s.items)) for s in p.sections if s.items]
+    assert any(t == "关键讨论" and c == "fact" and n >= 1 for t, c, n in cats_with_items), \
+        f"关键讨论 not recognized as fact: {cats_with_items}"

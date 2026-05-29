@@ -41,6 +41,42 @@ LOG_LEVEL = os.environ.get(
 ).upper()
 
 
+def _parse_memory_dirs() -> list[tuple[str, str]]:
+    """Parse memory dirs config into [(name, path), ...].
+
+    Priority:
+    1. KNOWLEDGE_WEAVER_MEMORY_DIRS (colon-separated, optional name= prefix)
+    2. KNOWLEDGE_WEAVER_MEMORY_DIR (singular, backwards compat)
+    3. Default _default_memory_dir() under source name "default"
+    """
+    multi = os.environ.get("KNOWLEDGE_WEAVER_MEMORY_DIRS", "").strip()
+    if multi:
+        result = []
+        for entry in multi.split(":"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if "=" in entry:
+                name, path = entry.split("=", 1)
+                result.append((name.strip(), os.path.expanduser(path.strip())))
+            else:
+                path = os.path.expanduser(entry)
+                name = os.path.basename(os.path.normpath(path)) or "default"
+                result.append((name, path))
+        return result
+
+    single = os.environ.get("KNOWLEDGE_WEAVER_MEMORY_DIR", "").strip()
+    if single:
+        path = os.path.expanduser(single)
+        name = os.path.basename(os.path.normpath(path)) or "default"
+        return [(name, path)]
+
+    return [("default", _default_memory_dir())]
+
+
+MEMORY_DIRS = _parse_memory_dirs()
+
+
 def _configure_logging() -> None:
     logging.basicConfig(
         level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -78,6 +114,7 @@ def create_server() -> FastMCP:
     async def knowledge_search(
         query: str,
         entity_type: str = "",
+        source: str = "",
         max_results: int = 10,
         min_score: float = 0.0,
         offset: int = 0,
@@ -93,8 +130,11 @@ def create_server() -> FastMCP:
         Args:
             query: The search query text. Can be a keyword, phrase, or natural language question.
             entity_type: Optional filter by entity type: project, decision, risk, preference, task, idea, tech, fact.
+            source: Optional filter by source agent name (e.g., "openclaw", "hermes"). Empty string = no filter.
             max_results: Maximum number of results to return (1-100, default 10).
-            min_score: Minimum importance score threshold (default 0.3). Lower values return more results.
+            min_score: Minimum importance score threshold (default 0.0, no filtering).
+                       Raise to filter out low-importance entities; fact/idea types tend to
+                       have low importance and will be hidden if min_score > 0.05.
             offset: Number of results to skip for pagination (default 0).
         """
         max_results = _clamp(max_results, 1, 100)
@@ -106,6 +146,7 @@ def create_server() -> FastMCP:
                 conn,
                 query=query,
                 entity_type=entity_type or None,
+                source=source or None,
                 max_results=max_results,
                 min_score=min_score,
                 embedder=get_embedder(),
@@ -255,7 +296,7 @@ def create_server() -> FastMCP:
             }, ensure_ascii=False)
 
         try:
-            result = run_consolidation(DB_PATH, MEMORY_DIR, embedder)
+            result = run_consolidation(DB_PATH, memory_dirs=MEMORY_DIRS, embedder=embedder)
         except Exception as exc:
             return json.dumps({
                 "error": str(exc),
@@ -330,8 +371,11 @@ def run_consolidation_cli() -> int:
         print("WARNING: Embedding not configured. Set EMBEDDING_BASE_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL.")
         print("Running consolidation without embeddings (vector search will be unavailable).")
 
-    result = _run(DB_PATH, MEMORY_DIR, embedder)
+    result = _run(DB_PATH, memory_dirs=MEMORY_DIRS, embedder=embedder)
     print(f"Consolidation: {result.status}")
+    print(f"  Sources: {len(MEMORY_DIRS)}")
+    for name, path in MEMORY_DIRS:
+        print(f"    - {name}: {path}")
     print(f"  Files processed: {result.files_processed}")
     print(f"  Files skipped:   {result.files_skipped}")
     print(f"  Entities created: {result.entities_created}")

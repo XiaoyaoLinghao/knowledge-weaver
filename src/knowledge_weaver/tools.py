@@ -126,6 +126,7 @@ def knowledge_search(
     *,
     query: str,
     entity_type: str | None = None,
+    source: str | None = None,
     max_results: int = 10,
     min_score: float = 0.0,
     embedder=None,
@@ -135,6 +136,7 @@ def knowledge_search(
     If an embedder is provided, use embedding-based cosine similarity.
     Otherwise fall back to FTS (LIKE-based) search via search_entities_fts.
     Apply min_score filter using ImportanceScorer.
+    Optional source filter by agent name (from entity metadata).
     """
     # Step 1: candidate retrieval
     if embedder is not None:
@@ -163,6 +165,18 @@ def knowledge_search(
     # Step 2: type filter
     if entity_type:
         candidates = [c for c in candidates if c.get("type") == entity_type]
+
+    # Step 2b: source filter (KW-F2)
+    if source:
+        filtered = []
+        for c in candidates:
+            try:
+                m = json.loads(c.get("metadata", "{}") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                m = {}
+            if m.get("source") == source:
+                filtered.append(c)
+        candidates = filtered
 
     # Step 3: importance score filter
     today = datetime.date.today()
@@ -605,6 +619,17 @@ def knowledge_stats(conn) -> dict:
     noise_count = sum(1 for s in scores if s < 0.3)
     noise_ratio = round(noise_count / total_entities, 4) if total_entities else 0.0
 
+    # Per-source entity counts (KW-F2)
+    source_counts: dict[str, int] = {}
+    rows = conn.execute("SELECT metadata FROM entities").fetchall()
+    for r in rows:
+        try:
+            m = json.loads(r["metadata"]) if r["metadata"] else {}
+            src = m.get("source", "default")
+            source_counts[src] = source_counts.get(src, 0) + 1
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     # Relation density by type
     rel_density = {}
     for etype, cnt in entity_counts.items():
@@ -634,4 +659,5 @@ def knowledge_stats(conn) -> dict:
         "noise_ratio": noise_ratio,
         "noise_entity_count": noise_count,
         "relation_density_by_type": rel_density,
+        "entity_counts_by_source": source_counts,
     }

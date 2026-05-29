@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import sqlite3
 import struct
 from typing import Optional
@@ -48,12 +49,14 @@ CREATE INDEX IF NOT EXISTS idx_relations_from_to ON relations(from_entity, to_en
 CREATE INDEX IF NOT EXISTS idx_relations_to_from ON relations(to_entity, from_entity);
 
 CREATE TABLE IF NOT EXISTS daily_manifest (
-    date        TEXT PRIMARY KEY,
+    date        TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'default',
     file_path   TEXT NOT NULL,
     file_hash   TEXT NOT NULL,
     entity_count INTEGER NOT NULL DEFAULT 0,
     processed_at TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'ok'
+    status      TEXT NOT NULL DEFAULT 'ok',
+    PRIMARY KEY (date, source)
 );
 
 CREATE TABLE IF NOT EXISTS access_log (
@@ -90,6 +93,9 @@ def _is_vec_loaded(conn: sqlite3.Connection) -> bool:
 
 def init_db(db_path: str) -> sqlite3.Connection:
     """Initialize SQLite database with all tables and indexes. Returns connection."""
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
@@ -117,6 +123,16 @@ def init_db(db_path: str) -> sqlite3.Connection:
                 "sqlite-vec extension not available; using Python-based vector search. "
                 "Install sqlite-vec for native vector search support."
             )
+
+    # Migrate daily_manifest if old single-PK schema exists
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(daily_manifest)")]
+        if cols and "source" not in cols:
+            conn.execute("ALTER TABLE daily_manifest ADD COLUMN source TEXT NOT NULL DEFAULT 'default'")
+            conn.commit()
+            logger.info("Migrated daily_manifest: added source column")
+    except sqlite3.OperationalError:
+        pass
 
     # Create FTS5 virtual table and rebuild index
     _init_fts_table(conn)
@@ -314,19 +330,20 @@ def get_entities_by_ids(
 # --- daily_manifest operations ---
 
 
-def get_manifest(conn: sqlite3.Connection, date: str) -> Optional[sqlite3.Row]:
-    """Get manifest entry for a given date."""
+def get_manifest(conn: sqlite3.Connection, date: str, source: str = "default") -> Optional[sqlite3.Row]:
+    """Get manifest entry for a given date and source."""
     return conn.execute(
-        "SELECT * FROM daily_manifest WHERE date=?", (date,)
+        "SELECT * FROM daily_manifest WHERE date=? AND source=?", (date, source)
     ).fetchone()
 
 
 def upsert_manifest(conn: sqlite3.Connection, entry: dict, auto_commit: bool = True) -> None:
     """Insert or update a daily manifest entry."""
+    entry = {"source": "default", **entry}
     conn.execute(
-        """INSERT INTO daily_manifest (date, file_path, file_hash, entity_count, processed_at, status)
-           VALUES (:date, :file_path, :file_hash, :entity_count, datetime('now'), :status)
-           ON CONFLICT(date) DO UPDATE SET
+        """INSERT INTO daily_manifest (date, source, file_path, file_hash, entity_count, processed_at, status)
+           VALUES (:date, :source, :file_path, :file_hash, :entity_count, datetime('now'), :status)
+           ON CONFLICT(date, source) DO UPDATE SET
            file_path=excluded.file_path, file_hash=excluded.file_hash,
            entity_count=excluded.entity_count, processed_at=datetime('now'),
            status=excluded.status""",

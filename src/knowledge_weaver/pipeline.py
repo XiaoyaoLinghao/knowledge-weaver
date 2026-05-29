@@ -101,13 +101,14 @@ def _to_linker_parsed_file(
 
 def run_consolidation(
     db_path: str,
-    memory_dir: str,
+    memory_dir: str | None = None,
     embedder: EmbeddingClient | None = None,
     today: date | None = None,
+    memory_dirs: list[tuple[str, str]] | None = None,
 ) -> ConsolidationResult:
     """Main consolidation pipeline.
 
-    1. Scan memory_dir for YYYY-MM-DD.md files
+    1. Scan memory dirs for YYYY-MM-DD.md files
     2. Check daily_manifest for already-processed unchanged files
     3. Parse each new/changed file
     4. Extract entities
@@ -115,46 +116,57 @@ def run_consolidation(
     6. Score importance
     7. Embed summaries (if embedder available)
     8. Update daily_manifest
+
+    memory_dirs: list of (source_name, path) tuples. Takes priority over memory_dir.
+    memory_dir: legacy single-dir param. Treated as [("default", memory_dir)] if provided without memory_dirs.
     """
     if today is None:
         today = date.today()
+
+    if memory_dirs is None:
+        if memory_dir is not None:
+            memory_dirs = [("default", memory_dir)]
+        else:
+            raise ValueError("Must provide memory_dir or memory_dirs")
 
     result = ConsolidationResult()
     conn = init_db(db_path)
     scorer = ImportanceScorer()
 
     try:
-        # Step 1: Discover candidate files
-        candidates = _discover_files(memory_dir)
-
-        # Step 2: Filter out unchanged files via manifest hash check
-        to_process, to_skip = _filter_unchanged(conn, candidates, memory_dir)
-        result.files_skipped = len(to_skip)
-
         # Collect all existing entity IDs for cross-day linking
         existing_ids: set[str] = {
             row["id"]
             for row in conn.execute("SELECT id FROM entities").fetchall()
         }
 
-        # Process each file
-        for date_str, filename in to_process:
-            try:
-                _process_file(
-                    conn=conn,
-                    date_str=date_str,
-                    filename=filename,
-                    memory_dir=memory_dir,
-                    embedder=embedder,
-                    scorer=scorer,
-                    today=today,
-                    existing_ids=existing_ids,
-                    result=result,
-                )
-            except Exception as exc:
-                result.files_failed += 1
-                result.errors.append(f"{filename}: {exc}")
-                logger.exception("Failed to process %s", filename)
+        for source_name, src_dir in memory_dirs:
+            # Step 1: Discover candidate files
+            candidates = _discover_files(src_dir)
+
+            # Step 2: Filter out unchanged files via manifest hash check
+            to_process, to_skip = _filter_unchanged(conn, candidates, src_dir, source_name)
+            result.files_skipped += len(to_skip)
+
+            # Process each file
+            for date_str, filename in to_process:
+                try:
+                    _process_file(
+                        conn=conn,
+                        date_str=date_str,
+                        filename=filename,
+                        memory_dir=src_dir,
+                        embedder=embedder,
+                        scorer=scorer,
+                        today=today,
+                        existing_ids=existing_ids,
+                        result=result,
+                        source_name=source_name,
+                    )
+                except Exception as exc:
+                    result.files_failed += 1
+                    result.errors.append(f"{source_name}/{filename}: {exc}")
+                    logger.exception("Failed to process %s/%s", source_name, filename)
 
         # Final status determination
         if result.files_failed > 0:
@@ -204,6 +216,7 @@ def _filter_unchanged(
     conn,
     candidates: list[tuple[str, str]],
     memory_dir: str,
+    source_name: str = "default",
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """Split candidates into (to_process, to_skip) based on manifest hash."""
     to_process: list[tuple[str, str]] = []
@@ -212,7 +225,7 @@ def _filter_unchanged(
     for date_str, filename in candidates:
         filepath = os.path.join(memory_dir, filename)
         file_hash = compute_file_hash(filepath)
-        manifest = get_manifest(conn, date_str)
+        manifest = get_manifest(conn, date_str, source_name)
 
         if manifest and manifest["file_hash"] == file_hash:
             to_skip.append((date_str, filename))
@@ -283,6 +296,7 @@ def _process_file(
     today: date,
     existing_ids: set[str],
     result: ConsolidationResult,
+    source_name: str = "default",
 ) -> None:
     """Process a single DMA file through the full pipeline."""
     filepath = os.path.join(memory_dir, filename)
@@ -294,6 +308,7 @@ def _process_file(
         # Empty file or parse failure — record manifest but allow retry
         upsert_manifest(conn, {
             "date": date_str,
+            "source": source_name,
             "file_path": filepath,
             "file_hash": "",  # don't lock the hash; allow retry on next run
             "entity_count": 0,
@@ -403,6 +418,9 @@ def _process_file(
             recent_day_count=recent_day_count,
         )
 
+        # Attach source name to metadata (KW-F2)
+        meta_dict = extracted.metadata if isinstance(extracted.metadata, dict) else {}
+        meta_dict["source"] = source_name
         entity_dict = {
             "id": extracted.id,
             "type": extracted.type,
@@ -413,7 +431,7 @@ def _process_file(
             "last_seen": date_str,
             "day_count": new_day_count,
             "source_lines": extracted.source_lines,
-            "metadata": json.dumps(extracted.metadata, ensure_ascii=False),
+            "metadata": json.dumps(meta_dict, ensure_ascii=False),
         }
         insert_entity(conn, entity_dict, auto_commit=False)
         existing_ids.add(extracted.id)
@@ -469,6 +487,7 @@ def _process_file(
     # Step 8: Update manifest
     upsert_manifest(conn, {
         "date": date_str,
+        "source": source_name,
         "file_path": filepath,
         "file_hash": file_hash,
         "entity_count": entity_count,

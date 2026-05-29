@@ -228,3 +228,62 @@ def test_tech_still_extracts_versioned_terms():
     names = [k["name"] for k in r]
     assert "Python3" in names
     assert any("ESP32" in n for n in names)
+
+
+def test_tech_fallback_rejects_sentence_fragments():
+    from knowledge_weaver.extractor import extract_entities_from_item
+    from knowledge_weaver.parser import ParsedItem
+    bad_inputs = [
+        "数据源提供REST API，标准JSON格式响应",
+        "实体命名规则：{区域} {设备名} [{子类别}] {属性}",
+        "分组策略：先按(区域, 设备名)分组",
+    ]
+    for text in bad_inputs:
+        item = ParsedItem(text=text, time=None, line_start=1, line_end=1)
+        ents = extract_entities_from_item(item, "技术/项目要点", "test.md")
+        tech_names = [e.name for e in ents if e.type == "tech"]
+        for n in tech_names:
+            assert "：" not in n and "，" not in n and "。" not in n, \
+                f"tech name contains CJK punctuation: {n!r}"
+            assert "(" not in n and "（" not in n, \
+                f"tech name contains parenthesis: {n!r}"
+
+
+def test_tech_fallback_keeps_real_tech_terms():
+    """Real technical mentions (CamelCase, acronyms, versioned) must still be extracted."""
+    from knowledge_weaver.extractor import extract_entities_from_item
+    from knowledge_weaver.parser import ParsedItem
+    item = ParsedItem(text="使用Python3开发，配合ESP32-S3芯片", time=None, line_start=1, line_end=1)
+    ents = extract_entities_from_item(item, "技术/项目要点", "test.md")
+    names = [e.name for e in ents if e.type == "tech"]
+    assert "Python3" in names or any("Python" in n for n in names), f"got: {names}"
+
+
+def test_dma_error_placeholders_are_filtered():
+    """KW SPEC v1.0 §6: agent failure placeholders match *<AGENT>-ERR: <reason>*."""
+    from knowledge_weaver.extractor import _is_garbage
+    samples = [
+        "DMA-ERR: cloud summary failed (see log)",
+        "DMA-ERR: get-cloud-creds failed (check .master_key & credentials.enc)",
+        "DMA-ERR: no credentials.enc",
+        "DMA-ERR: cloud summarizer disabled",
+        "HERMES-ERR: api timeout after 30s",
+        "OPENCLAW-ERR: skill not found",
+    ]
+    for s in samples:
+        assert _is_garbage(s), f"agent error placeholder not filtered: {s!r}"
+
+
+def test_dma_error_pattern_does_not_match_normal_text():
+    """The -ERR: pattern must not catch normal text containing 'ERR'."""
+    from knowledge_weaver.extractor import _is_garbage
+    import re
+    samples = [
+        "the error was in line 5",
+        "ERR is short for error",
+        "HTTP 500 internal server error",
+    ]
+    for s in samples:
+        long_text = s + " " + ("x" * 20)
+        pat = re.compile(r".*-ERR:.*")
+        assert not pat.match(long_text), f"-ERR: rule false positive: {long_text!r}"

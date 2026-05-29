@@ -23,6 +23,7 @@ CATEGORY_TO_TYPE: dict[str, str] = {
     "技术/项目要点": "tech",
     "风险与注意事项": "risk",
     "创意与想法": "idea",
+    "关键讨论": "fact",  # KW SPEC v1.0 §4.2 extension category
 }
 
 # Type prefix mapping for entity IDs
@@ -84,6 +85,8 @@ _TECH_EXT_RE = re.compile(r"\b([\w-]+\.(?:py|js|ts|rs|go|java|rb|sh|yaml|yml|jso
 _GARBAGE_PATTERNS = [
     re.compile(r".*摘要失败.*"),
     re.compile(r".*见日志.*"),
+    # KW SPEC v1.0 §6: agent failure placeholders match *<AGENT>-ERR: <reason>*
+    re.compile(r".*-ERR:.*"),
 ]
 
 # Time-stamp log patterns — DMA session metadata, not knowledge
@@ -124,6 +127,20 @@ _PROJECT_VERB_PREFIXES = ("启动", "完成", "决定", "开始", "上线", "推
 _PROJECT_STRUCTURAL_WORDS = frozenset({
     "基于", "作为", "采用", "使用", "通过", "包含", "利用", "按照", "针对", "关于",
 })
+
+# Characters that indicate a tech default-fallback name is actually a phrase
+_CJK_PUNCTUATION = "、，。：；！？「」『』《》（）()…—·"
+
+
+def _looks_like_tech_term(name: str) -> bool:
+    """Reject fallback tech names that look like a sentence fragment."""
+    if any(ch in name for ch in _CJK_PUNCTUATION):
+        return False
+    # Either starts with ASCII letter (Python, ESP32) OR is short pure-CJK term
+    if name and name[0].isascii() and name[0].isalpha():
+        return True
+    cjk_only = all('一' <= c <= '鿿' for c in name if c.strip())
+    return cjk_only and 2 <= len(name) <= 8
 
 
 def _strip_verb_prefix(name: str) -> str:
@@ -582,6 +599,9 @@ def extract_entities_from_item(
     # prefix of the text (name covers >80% of text), it's a redundant copy.
     text_stripped = text.strip()
     if len(name) >= 4 and name == text_stripped[:len(name)] and len(name) > len(text_stripped) * 0.8:
+        return entities
+    # For tech type, reject fallback names that look like sentence fragments
+    if entity_type == "tech" and not _looks_like_tech_term(name):
         return entities
     eid = generate_entity_id(entity_type, name)
     _add(eid, entity_type, name, text)

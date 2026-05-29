@@ -262,3 +262,13 @@ def test_vec_available_per_connection(tmp_path):
     r2 = _can_use_vec(db2)
     assert r1 == r2
     db1.close(); db2.close()
+
+
+def test_init_db_creates_parent_directory(tmp_path):
+    """init_db must create the DB file's parent directory if missing."""
+    from knowledge_weaver.db import init_db
+    import os
+    db_path = str(tmp_path / "nested" / "deeper" / "k.db")
+    conn = init_db(db_path)
+    conn.close()
+    assert os.path.exists(db_path)

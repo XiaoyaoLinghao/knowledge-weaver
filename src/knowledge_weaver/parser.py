@@ -19,6 +19,7 @@ DMA_CATEGORY_MAP: dict[str, str] = {
     "技术/项目要点": "tech",
     "风险与注意事项": "risk",
     "创意与想法": "idea",
+    "关键讨论": "fact",  # KW SPEC v1.0 §4.2 extension category
 }
 
 # Regex for timestamp extraction: HH:MM or HH:MM:SS at the start of an item
