@@ -27,6 +27,7 @@ from knowledge_weaver.db import (
     log_access,
     search_entities_fts,
 )
+from knowledge_weaver.registry import load_registered_slugs
 from knowledge_weaver.scorer import ImportanceScorer, filter_by_score, score_entity
 
 logger = logging.getLogger(__name__)
@@ -184,9 +185,10 @@ def knowledge_search(
     scored_candidates = filter_by_score(candidates, min_score=min_score, today=today)
 
     # Step 4: filter provisional projects before slicing (先滤后切,避免顶替丢失)
+    reg = load_registered_slugs()
     non_provisional = [
         c for c in scored_candidates
-        if not is_provisional_project(c)
+        if not is_provisional_project(c, reg)
     ]
     candidates_slice = non_provisional[:max_results]
 
@@ -355,9 +357,10 @@ def active_projects(
 
     # Query type='project' with last_seen within lookback
     project_rows = list_entities_by_type(conn, "project")
+    reg = load_registered_slugs()
     active = [
         r for r in project_rows
-        if r["last_seen"] >= cutoff and not is_provisional_project(r)
+        if r["last_seen"] >= cutoff and not is_provisional_project(r, reg)
     ]
 
     # Pre-load all tasks once (instead of per-project query)

@@ -15,6 +15,7 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from knowledge_weaver.db import PROJECT_GRACE_DAYS, PROJECT_MIN_DAYS
+from knowledge_weaver.registry import load_registered_slugs
 from knowledge_weaver.scorer import score_entity
 from knowledge_weaver.extractor import (
     _TIMESTAMP_LOG_RE,
@@ -82,11 +83,20 @@ def _find_noisy_entity_ids(conn: sqlite3.Connection) -> dict[str, list[str]]:
     }
 
     # Step A0: Provisional stale projects — low day_count + beyond grace period
+    # Exclude registered projects (bypass the recurrence gate)
+    reg_slugs = load_registered_slugs()
     grace_cutoff = (date.today() - timedelta(days=PROJECT_GRACE_DAYS)).isoformat()
-    rows = conn.execute(
-        "SELECT id FROM entities WHERE type='project' AND day_count < ? AND last_seen < ?",
-        (PROJECT_MIN_DAYS, grace_cutoff),
-    ).fetchall()
+    if reg_slugs:
+        slug_placeholders = ",".join("?" * len(reg_slugs))
+        rows = conn.execute(
+            f"SELECT id FROM entities WHERE type='project' AND day_count < ? AND last_seen < ? AND id NOT IN ({slug_placeholders})",
+            (PROJECT_MIN_DAYS, grace_cutoff) + tuple(sorted(reg_slugs)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id FROM entities WHERE type='project' AND day_count < ? AND last_seen < ?",
+            (PROJECT_MIN_DAYS, grace_cutoff),
+        ).fetchall()
     noisy["provisional_stale"] = [r["id"] for r in rows]
 
     # Step A1: Timestamp fact entities (multiple patterns)
