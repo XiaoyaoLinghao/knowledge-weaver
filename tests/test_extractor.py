@@ -413,3 +413,65 @@ def test_empty_day_marker_yields_no_entities(tmp_path):
     for sec in pf.sections:
         ents += extract_entities_from_section(sec, str(f), getattr(sec, "category", None))
     assert ents == []
+
+
+def test_wave10_heartbeat_meta_filtered():
+    """Wave 10 rebuild: 心跳元描述应被过滤（覆盖 心跳检测/心跳中 等变体）。"""
+    for s in [
+        "当日首次心跳检测于 06:55 触发，助理执行了每日检查流程。",
+        "系统每日检查已在06:00后首次心跳中触发，磁盘检查已执行。",
+    ]:
+        assert _is_garbage(s), f"心跳元描述未被过滤: {s!r}"
+
+
+# ---------------------------------------------------------------------------
+# project 实体噪声治理：治本修复 验收测试 (Fix Plan §4)
+# ---------------------------------------------------------------------------
+
+def test_project_extraction_rejects_phrase_fragments():
+    """治本：含功能词/动词的 {name}项目 片段不得产出 project 实体。"""
+    noise_samples = [
+        "归'其他工作'分类而非新建项目",
+        "任务归属匹配已有项目",
+        "阿拉山口为已有项目",
+        "阿拉山口独立成项目",
+        "用户倾向 DIY 玩具类项目",
+        "无成熟项目",
+        "这是一个项目",
+        "工作记录必须按项目归属分组",
+        "强调项目归属精确",
+        "修改全部项目",
+        "候选人声称完成所有项目",
+        "IIC 级气体防爆四足机器人的项目需求",
+    ]
+    for s in noise_samples:
+        names = [p["name"] for p in extract_projects(s)]
+        assert names == [], f"应为空但得到 {names}：{s}"
+
+
+def test_project_extraction_keeps_real_projects():
+    """真实项目（显式标记）必须保留，含带空格变体。"""
+    assert "心连心" in [p["name"] for p in extract_projects("心连心项目进展顺利")]
+    assert "HomeBrain" in [p["name"] for p in extract_projects("HomeBrain项目上线")]      # 无空格
+    assert "HomeBrain" in [p["name"] for p in extract_projects("HomeBrain 项目上线")]     # 带空格
+    assert "HomeBrain" in [p["name"] for p in extract_projects("HomeBrain project shipped")]
+
+
+def test_latin_marker_with_space_regression():
+    """既有 bug 回归：Latin 名 + 空格 + 项目 此前被漏捕。"""
+    assert "Esp32" in [p["name"] for p in extract_projects("Esp32 项目启动")]
+
+
+def test_bare_camelcase_not_project_but_is_tech():
+    """无项目标记的裸驼峰词不再是 project，但仍是 tech（不丢信息）。"""
+    s = "讨论了 XiaomiDriver、WebSocket、SpotMicro、LangGraph、GitHub 的实现"
+    assert [p["name"] for p in extract_projects(s)] == []
+    tech = {t["name"] for t in extract_tech_keywords(s)}
+    assert {"XiaomiDriver", "WebSocket", "LangGraph"} <= tech
+
+
+def test_marker_only_extracts_real_project_from_noisy_sentence():
+    """混排长句：仅带标记的 HomeBrain 进 project，其余裸词全拒。"""
+    s = ("HomeBrain 项目使用了 XiaomiDriver 和 WebSocket，参考 SpotMicro 和 "
+         "OpenCat，基于 LangGraph 和 AutoGen，托管 GitHub")
+    assert [p["name"] for p in extract_projects(s)] == ["HomeBrain"]

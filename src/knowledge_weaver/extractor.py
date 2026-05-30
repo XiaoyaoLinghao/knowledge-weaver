@@ -74,10 +74,9 @@ DEFAULT_IMPORTANCE: dict[str, float] = {
 # Project name detection patterns (language-agnostic, no user-specific names)
 # Chinese: {name}项目 e.g. "心连心项目" — limit to 2-12 CJK chars immediately before 项目
 _PROJECT_CN_RE = re.compile(r"([一-鿿]{2,12})项目")
-# Latin project names immediately before 项目: CamelCase or ALL_CAPS abbreviations
-_PROJECT_LATIN_BEFORE_CN_RE = re.compile(r"([A-Z][A-Za-z0-9]{1,30})项目")
-# English: CamelCase words that look like project names e.g. HomeBrain, OpenClaw
-_PROJECT_CAMEL_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
+# Latin project names before 项目: marker-driven with optional whitespace tolerance
+# (replaces the old tight-coupling _PROJECT_LATIN_BEFORE_CN_RE which missed "Esp32 项目")
+_PROJECT_LATIN_MARKER_RE = re.compile(r"([A-Z][A-Za-z0-9]+)\s*项目")
 # English: "X Project" / "X project"
 _PROJECT_EN_RE = re.compile(r"\b([A-Z][\w]+)\s+[Pp]roject\b")
 
@@ -107,8 +106,8 @@ _GARBAGE_PATTERNS = [
     # KW SPEC v1.0 §6: agent failure placeholders match *<AGENT>-ERR: <reason>*
     re.compile(r".*-ERR:.*"),
     # Wave 9: 心跳/元描述/运维快照噪声（防止心跳时段元描述被抽成实体）
-    re.compile(r".*心跳轮询.*"),
-    re.compile(r".*(心跳轮询|heartbeat\s*(poll|轮询)).*", re.IGNORECASE),
+    re.compile(r".*心跳.*"),                       # 覆盖 心跳轮询/心跳检测/心跳中/首次心跳 等所有心跳元描述
+    re.compile(r".*heartbeat.*", re.IGNORECASE),   # 英文心跳标记
     re.compile(r".*本次对话(仅|无|只).*"),       # "本次对话仅包含..."、"本次对话无任何实质内容"
     re.compile(r".*无(任何)?实质(性)?(内容|进展|输入).*"),
     re.compile(r".*(仅|只)包含.*(系统|心跳|轮询|检查).*"),
@@ -158,6 +157,23 @@ _PROJECT_STRUCTURAL_WORDS = frozenset({
     "基于", "作为", "采用", "使用", "通过", "包含", "利用", "按照", "针对", "关于",
 })
 
+# Characters that almost never appear in proper-noun project names;
+# their presence signals a sentence/phrase fragment rather than a real project name.
+# (Built from 32 known noise samples + common CJK function/verb characters.)
+_CN_NON_NAME_CHARS = frozenset(
+    # Function words, auxiliaries, conjunctions — almost never in proper project names
+    "的了为而非是这那个全部所必须按把被与和或让使之其此即则等着过得"
+    # High-frequency verbs, predicate fragments, and noise-indicating modifiers
+    "无有归匹配声称完倾向强调修改注立成类该项核偏"
+    # Additional chars from full memory scan: function/preposition/modifier fragments
+    # that appear in 28+ noise candidates but in 0 real project names (心连心/阿拉山口)
+    "开具体希望远求重将相忆视架构在但基本前拆滚动玩户期更实认标软件免因素书端出操究理整型避"
+)
+
+# A real Chinese project name rarely exceeds 8 characters;
+# names longer than this are almost certainly sentence fragments.
+_PROJECT_CN_MAX_LEN = 8
+
 # Characters that indicate a tech default-fallback name is actually a phrase
 _CJK_PUNCTUATION = "、，。：；！？「」『』《》（）()…—·"
 
@@ -186,12 +202,18 @@ def _strip_verb_prefix(name: str) -> str:
 
 
 def _is_valid_project_name(name: str) -> bool:
-    """Return False if the name contains structural words that make it look like a phrase."""
-    if len(name) < 2:
+    """True only when name looks like a proper noun (not a sentence fragment).
+
+    Rejects names that contain CJK function words, verb fragments,
+    structural markers, or exceed reasonable project name length.
+    """
+    if not (2 <= len(name) <= _PROJECT_CN_MAX_LEN):
         return False
     for w in _PROJECT_STRUCTURAL_WORDS:
         if w in name:
             return False
+    if any(ch in _CN_NON_NAME_CHARS for ch in name):
+        return False
     return True
 
 # Time/duration descriptions that are not meaningful entities
@@ -297,8 +319,9 @@ def extract_projects(text: str) -> list[dict]:
     seen: set[str] = set()
     latin_spans: set[tuple[int, int]] = set()
 
-    # Pattern 1a: Latin project name immediately before 项目 (e.g. "ExampleProject项目")
-    for m in _PROJECT_LATIN_BEFORE_CN_RE.finditer(text):
+    # Pattern 1a: Latin project name + optional whitespace + 项目 marker
+    # (e.g. "ExampleProject项目", "HomeBrain 项目", "Esp32 项目")
+    for m in _PROJECT_LATIN_MARKER_RE.finditer(text):
         name = m.group(1).strip()
         if name and name not in seen and not _is_garbage_name(name) and len(name) >= 3:
             seen.add(name)
@@ -313,13 +336,6 @@ def extract_projects(text: str) -> list[dict]:
         raw_name = m.group(1).strip()
         name = _strip_verb_prefix(raw_name)
         if name and _is_valid_project_name(name) and name not in seen and not _is_garbage_name(name):
-            seen.add(name)
-            results.append(_make_entity("project", name, text))
-
-    # Pattern 2: English CamelCase (likely project names like HomeBrain, OpenClaw)
-    for m in _PROJECT_CAMEL_RE.finditer(text):
-        name = m.group(1)
-        if name not in seen and not _is_garbage_name(name) and len(name) >= 4:
             seen.add(name)
             results.append(_make_entity("project", name, text))
 
