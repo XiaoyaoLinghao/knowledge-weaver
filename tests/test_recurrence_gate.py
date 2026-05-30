@@ -262,6 +262,55 @@ class TestKnowledgeSearchExcludesProvisional:
         names = [x["name"] for x in r["results"]]
         assert "A Risk" in names
 
+    def test_search_fill_rate_max_results_when_provisional_in_top_n(self, seeded_conn):
+        """先前切后滤 bug: top N 里混入 provisional 被踢后,合法候选未顶上来→少返.
+        注入 >max_results 候选,让前 10 含 2 个 provisional,确认仍返回 max_results 条."""
+        conn = seeded_conn
+
+        # Inject 12 project candidates (2 provisional + 10 established) to exceed default max_results=10
+        today_s = date.today().isoformat()
+        fill_entities = [
+            {
+                "id": f"proj:fill_{i:02d}",
+                "type": "project",
+                "name": f"FillProject{i:02d}",
+                "summary": f"Fill entity {i}",
+                "importance": 0.9 - i * 0.01,
+                "first_seen": today_s,
+                "last_seen": today_s,
+                "day_count": 3,
+                "source_lines": "[]",
+                "metadata": "{}",
+            }
+            for i in range(1, 11)
+        ]
+        for ent in fill_entities:
+            conn.execute(
+                "INSERT INTO entities (id, type, name, summary, importance, first_seen, last_seen, day_count, source_lines, metadata) "
+                "VALUES (:id,:type,:name,:summary,:importance,:first_seen,:last_seen,:day_count,:source_lines,:metadata) "
+                "ON CONFLICT(id) DO NOTHING",
+                ent,
+            )
+            # Also register in FTS (OR IGNORE for virtual table compat)
+            conn.execute(
+                "INSERT OR IGNORE INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
+                (ent["id"], ent["name"], ent["summary"], ent["type"]),
+            )
+        conn.commit()
+
+        r = knowledge_search(conn, query="Fill", max_results=10)
+        names = [x["name"] for x in r["results"]]
+        assert len(r["results"]) == 10, (
+            f"先切后滤 bug: 预期 10 条,实际 {len(r['results'])} 条. "
+            f"结果: {names}"
+        )
+        # Confirm EstablishedProject and at least 9 fill projects present
+        fill_count = sum(1 for n in names if n.startswith("FillProject"))
+        assert fill_count >= 9, f"至少 9 个 FillProject 应在结果中,实际 {fill_count}"
+        # Confirm provisional items not present
+        assert "ProvisionalNew" not in names
+        assert "ProvisionalStale" not in names
+
 
 # ---------------------------------------------------------------------------
 # Tests: prune removes stale provisional

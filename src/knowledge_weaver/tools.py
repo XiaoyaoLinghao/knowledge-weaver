@@ -183,11 +183,12 @@ def knowledge_search(
     today = datetime.date.today()
     scored_candidates = filter_by_score(candidates, min_score=min_score, today=today)
 
-    # Step 4: filter provisional projects before building results
-    candidates_slice = [
-        c for c in scored_candidates[:max_results]
+    # Step 4: filter provisional projects before slicing (先滤后切,避免顶替丢失)
+    non_provisional = [
+        c for c in scored_candidates
         if not is_provisional_project(c)
     ]
+    candidates_slice = non_provisional[:max_results]
 
     # Step 5: build results
     # fix: batch-load relations for all candidates to eliminate N+1
