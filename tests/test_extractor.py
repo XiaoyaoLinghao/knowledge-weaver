@@ -3,6 +3,7 @@
 from knowledge_weaver.parser import ParsedSection, ParsedItem
 from knowledge_weaver.extractor import (
     ExtractedEntity,
+    _is_garbage,
     generate_entity_id,
     slugify,
     extract_entities_from_section,
@@ -364,3 +365,33 @@ def test_v11_task_status_from_tag():
     ents = extract_entities_from_item(item_todo, "fact", "test.md")
     task_ents = [e for e in ents if e.type == "task"]
     assert any(e.metadata.get("status") == "todo" for e in task_ents)
+
+
+def test_wave9_heartbeat_meta_noise_filtered():
+    """Wave 9: 心跳/元描述/运维快照应被识别为噪声。"""
+    noise = [
+        "本次对话仅包含系统心跳轮询与DAILY检查操作",
+        "本次对话无任何实质性内容",
+        "OpenClaw 心跳轮询事件组成，无用户指令",
+        "本时段无实质内容（仅系统心跳轮询）",
+        "OpenClaw 系统日常服务器状态：磁盘使用 37%，剩余 60G",
+        "仅包含 4 次 OpenClaw 心跳轮询",
+        "本时段本地提取无输出",
+        "助理检测后确认无 pending 子会话",
+    ]
+    for s in noise:
+        assert _is_garbage(s), f"未被识别为噪声: {s!r}"
+
+
+def test_wave9_real_knowledge_not_filtered():
+    """Wave 9: 真实知识不应被新噪声规则误伤。"""
+    real = [
+        "后端框架：Python FastAPI（用户决定用 FastAPI）",
+        "决定使用规则引擎而非 LLM 批量处理",
+        "DB 连接池配置过小在高并发下可能耗尽",
+        "完成 ExampleProject 登录模块基础架构与单元测试",
+        "用户偏好简洁直接的代码风格",
+        "Knowledge Weaver 系统版本 v0.2.2，已索引 2221 实体",  # 含数字但是真实知识
+    ]
+    for s in real:
+        assert not _is_garbage(s), f"真实知识被误过滤: {s!r}"

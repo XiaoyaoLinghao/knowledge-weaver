@@ -106,6 +106,17 @@ _GARBAGE_PATTERNS = [
     re.compile(r".*见日志.*"),
     # KW SPEC v1.0 §6: agent failure placeholders match *<AGENT>-ERR: <reason>*
     re.compile(r".*-ERR:.*"),
+    # Wave 9: 心跳/元描述/运维快照噪声（防止心跳时段元描述被抽成实体）
+    re.compile(r".*心跳轮询.*"),
+    re.compile(r".*(心跳轮询|heartbeat\s*(poll|轮询)).*", re.IGNORECASE),
+    re.compile(r".*本次对话(仅|无|只).*"),       # "本次对话仅包含..."、"本次对话无任何实质内容"
+    re.compile(r".*无(任何)?实质(性)?(内容|进展|输入).*"),
+    re.compile(r".*(仅|只)包含.*(系统|心跳|轮询|检查).*"),
+    re.compile(r".*本时段无(提取|实质)内容.*"),
+    re.compile(r".*本地提取无输出.*"),
+    re.compile(r".*(磁盘|内存)(使用|空间).*\d+(%|G|GB|MB).*"),  # 运维快照 "磁盘使用 37%"
+    re.compile(r".*pending 子会话.*"),
+    re.compile(r".*DAILY 检查.*"),
 ]
 
 # Time-stamp log patterns — DMA session metadata, not knowledge
