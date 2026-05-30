@@ -1,6 +1,6 @@
 """Tests for the entity extractor module."""
 
-from knowledge_weaver.parser import ParsedSection, ParsedItem
+from knowledge_weaver.parser import ParsedSection, ParsedItem, parse_dma_file
 from knowledge_weaver.extractor import (
     ExtractedEntity,
     _is_garbage,
@@ -395,3 +395,21 @@ def test_wave9_real_knowledge_not_filtered():
     ]
     for s in real:
         assert not _is_garbage(s), f"真实知识被误过滤: {s!r}"
+
+
+def test_empty_day_marker_yields_no_entities(tmp_path):
+    """Wave 10: 空日标记文件（仅 HTML 注释，0 时间槽）→ KW 0 section / 0 实体。"""
+    f = tmp_path / "2026-06-01.md"
+    f.write_text(
+        '---\ntitle: "2026-06-01 会话记忆"\ndate: "2026-06-01"\n---\n\n'
+        '# 2026-06-01\n\n'
+        '<!-- 本日无对话内容：DMA 全时段仅心跳/系统巡检，KW 不收录。 -->\n',
+        encoding="utf-8",
+    )
+    pf = parse_dma_file(str(f))
+    assert pf.date == "2026-06-01"
+    assert len(pf.sections) == 0
+    ents = []
+    for sec in pf.sections:
+        ents += extract_entities_from_section(sec, str(f), getattr(sec, "category", None))
+    assert ents == []
