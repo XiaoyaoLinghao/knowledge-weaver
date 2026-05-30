@@ -162,12 +162,9 @@ _PROJECT_STRUCTURAL_WORDS = frozenset({
 # (Built from 32 known noise samples + common CJK function/verb characters.)
 _CN_NON_NAME_CHARS = frozenset(
     # Function words, auxiliaries, conjunctions — almost never in proper project names
-    "的了为而非是这那个全部所必须按把被与和或让使之其此即则等着过得"
+    "的了为而非是这那个全部所必须按把被与和或让使其此即则等着过得"
     # High-frequency verbs, predicate fragments, and noise-indicating modifiers
-    "无有归匹配声称完倾向强调修改注立成类该项核偏"
-    # Additional chars from full memory scan: function/preposition/modifier fragments
-    # that appear in 28+ noise candidates but in 0 real project names (心连心/阿拉山口)
-    "开具体希望远求重将相忆视架构在但基本前拆滚动玩户期更实认标软件免因素书端出操究理整型避"
+    "无有归匹配声称完倾向强调修改注立成类该项偏"
 )
 
 # A real Chinese project name rarely exceeds 8 characters;
