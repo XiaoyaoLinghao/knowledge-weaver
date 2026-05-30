@@ -122,7 +122,7 @@ def parse_registry(text: str) -> list[ProjectEntry]:
                 if field:
                     field_name, field_value = field
                     if field_name == "别名":
-                        aliases = [a.strip() for a in field_value.split(",") if a.strip()]
+                        aliases = [a.strip() for a in re.split(r"[,、，]", field_value) if a.strip()]
                     elif field_name == "状态":
                         status = field_value
                     # 存储, 技术栈, 起, 止, 简述 → intentionally discarded
