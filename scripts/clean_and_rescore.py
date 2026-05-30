@@ -9,11 +9,12 @@ import re
 import sqlite3
 import sys
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 
 # Allow imports from project src
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from knowledge_weaver.db import PROJECT_GRACE_DAYS, PROJECT_MIN_DAYS
 from knowledge_weaver.scorer import score_entity
 from knowledge_weaver.extractor import (
     _TIMESTAMP_LOG_RE,
@@ -77,7 +78,16 @@ def _find_noisy_entity_ids(conn: sqlite3.Connection) -> dict[str, list[str]]:
         "timestamp_fact": [],
         "common_tech": [],
         "structural_tech": [],
+        "provisional_stale": [],
     }
+
+    # Step A0: Provisional stale projects — low day_count + beyond grace period
+    grace_cutoff = (date.today() - timedelta(days=PROJECT_GRACE_DAYS)).isoformat()
+    rows = conn.execute(
+        "SELECT id FROM entities WHERE type='project' AND day_count < ? AND last_seen < ?",
+        (PROJECT_MIN_DAYS, grace_cutoff),
+    ).fetchall()
+    noisy["provisional_stale"] = [r["id"] for r in rows]
 
     # Step A1: Timestamp fact entities (multiple patterns)
     rows = conn.execute("SELECT id, name FROM entities WHERE type = 'fact'").fetchall()
@@ -239,6 +249,11 @@ def main() -> None:
         action="store_true",
         help="Print impact summary without making any changes",
     )
+    parser.add_argument(
+        "--prune-only",
+        action="store_true",
+        help="Only prune noisy/stale entities; skip rescoring (for periodic cron usage)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.db_path):
@@ -280,7 +295,8 @@ def main() -> None:
         print(f"{'=' * 60}")
         print(f"  Would delete {len(all_noisy_ids)} noisy entities (and their relations/vectors)")
         print(f"  Would delete {weak_rel_count} weak RELATES_TO relations")
-        print(f"  Would rescore {stats_before['total_entities'] - len(all_noisy_ids)} remaining entities")
+        if not args.prune_only:
+            print(f"  Would rescore {stats_before['total_entities'] - len(all_noisy_ids)} remaining entities")
         conn.close()
         return
 
@@ -292,9 +308,12 @@ def main() -> None:
     weak_deleted = _delete_weak_relates_to(conn)
     print(f"  Step B: Deleted {weak_deleted} weak RELATES_TO relations")
 
-    # Step C: Rescore remaining entities
-    rescored = _rescore_entities(conn)
-    print(f"  Step C: Rescored {rescored} entities")
+    # Step C: Rescore remaining entities (skip if prune-only)
+    if args.prune_only:
+        print(f"  Step C: Skipped rescore (--prune-only mode)")
+    else:
+        rescored = _rescore_entities(conn)
+        print(f"  Step C: Rescored {rescored} entities")
 
     conn.commit()
 

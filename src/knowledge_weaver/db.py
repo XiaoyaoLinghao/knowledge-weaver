@@ -1,5 +1,7 @@
 """SQLite schema and CRUD operations for Knowledge Weaver."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -8,6 +10,10 @@ import struct
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# Recurrence Gate — A-soft project entity promotion thresholds
+PROJECT_MIN_DAYS = int(os.getenv("KNOWLEDGE_WEAVER_PROJECT_MIN_DAYS", "2"))
+PROJECT_GRACE_DAYS = int(os.getenv("KNOWLEDGE_WEAVER_PROJECT_GRACE_DAYS", "14"))
 
 # fix: unified from embedder module — production vectors are 1024-dim
 from knowledge_weaver.embedder import DEFAULT_DIMENSION
@@ -186,6 +192,34 @@ def _init_fts_table(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
         logger.info("FTS5 index rebuilt from %d entities", count)
+
+
+def is_provisional_project(row: dict, registered_slugs: set[str] | None = None) -> bool:
+    """A project with day_count below threshold is 'provisional' (hidden from queries).
+
+    Non-project types always return False.
+    Explicitly registered projects (via registered_slugs) bypass the gate.
+    Accepts both dict and sqlite3.Row objects.
+    """
+    # Support both dict.get() and sqlite3.Row dict-style access
+    try:
+        row_type = row.get("type")
+    except AttributeError:
+        row_type = row["type"] if "type" in row.keys() else None
+    if row_type != "project":
+        return False
+    if registered_slugs:
+        try:
+            row_id = row.get("id")
+        except AttributeError:
+            row_id = row["id"] if "id" in row.keys() else None
+        if row_id in registered_slugs:
+            return False
+    try:
+        day_count = row.get("day_count", 0)
+    except AttributeError:
+        day_count = row["day_count"] if "day_count" in row.keys() else 0
+    return day_count < PROJECT_MIN_DAYS
 
 
 # --- Entity operations ---

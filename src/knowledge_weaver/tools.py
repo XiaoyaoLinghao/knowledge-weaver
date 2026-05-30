@@ -20,6 +20,7 @@ from knowledge_weaver.db import (
     get_entity,
     get_relations_for_entities,
     get_relations_for_entity,
+    is_provisional_project,
     list_all_entities,
     list_all_manifest,
     list_entities_by_type,
@@ -182,9 +183,14 @@ def knowledge_search(
     today = datetime.date.today()
     scored_candidates = filter_by_score(candidates, min_score=min_score, today=today)
 
-    # Step 4: build results
+    # Step 4: filter provisional projects before building results
+    candidates_slice = [
+        c for c in scored_candidates[:max_results]
+        if not is_provisional_project(c)
+    ]
+
+    # Step 5: build results
     # fix: batch-load relations for all candidates to eliminate N+1
-    candidates_slice = scored_candidates[:max_results]
     all_candidate_ids = [c.get("id", "") for c in candidates_slice if c.get("id")]
     batch_rels = get_relations_for_entities(conn, all_candidate_ids)
     # Build eid -> [related_rels] map
@@ -348,7 +354,10 @@ def active_projects(
 
     # Query type='project' with last_seen within lookback
     project_rows = list_entities_by_type(conn, "project")
-    active = [r for r in project_rows if r["last_seen"] >= cutoff]
+    active = [
+        r for r in project_rows
+        if r["last_seen"] >= cutoff and not is_provisional_project(r)
+    ]
 
     # Pre-load all tasks once (instead of per-project query)
     all_tasks = list_entities_by_type(conn, "task")
