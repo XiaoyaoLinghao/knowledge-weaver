@@ -123,6 +123,23 @@ def _build_entity_result(row) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+_RRF_K = 60
+
+
+def _rrf_merge(lists: list[list[dict]], k: int = _RRF_K) -> list[dict]:
+    """Reciprocal-rank fusion of ranked candidate lists (by entity id)."""
+    scores: dict[str, float] = {}
+    item_by_id: dict[str, dict] = {}
+    for lst in lists:
+        for rank, item in enumerate(lst):
+            iid = item.get("id")
+            if not iid:
+                continue
+            item_by_id.setdefault(iid, item)
+            scores[iid] = scores.get(iid, 0.0) + 1.0 / (k + rank + 1)
+    return [item_by_id[i] for i in sorted(scores, key=lambda x: scores[x], reverse=True)]
+
+
 def knowledge_search(
     conn,
     *,
@@ -140,29 +157,28 @@ def knowledge_search(
     Apply min_score filter using ImportanceScorer.
     Optional source filter by agent name (from entity metadata).
     """
-    # Step 1: candidate retrieval
+    # Step 1: candidate retrieval — RRF hybrid (vector + FTS) when an embedder
+    # is available, FTS-only otherwise. Fusing both lists recalls more than the
+    # previous either/or, and (with jieba FTS) handles Chinese queries well.
+    k = max_results * 3
+    fts_list = [_row_to_dict(r) for r in search_entities_fts(conn, query, limit=k)]
+
+    vec_list: list = []
     if embedder is not None:
-        # Embedding-based search path
         try:
             query_vec = embedder.embed(query)
             if query_vec:
                 from knowledge_weaver.db import search_entity_vectors
-                candidates_raw = search_entity_vectors(conn, query_vec, limit=max_results * 3)
-                candidates = [_row_to_dict(r) for r in candidates_raw]
-            else:
-                candidates = None
+                vec_list = [_row_to_dict(r)
+                            for r in search_entity_vectors(conn, query_vec, limit=k)]
         except Exception:
-            logger.warning("Embedding search failed, falling back to FTS")
-            candidates = None
+            logger.warning("Embedding search failed; using FTS only")
+            vec_list = []
 
-        if candidates is None:
-            # FTS fallback
-            rows = search_entities_fts(conn, query, limit=max_results * 3)
-            candidates = [_row_to_dict(r) for r in rows]
+    if vec_list and fts_list:
+        candidates = _rrf_merge([vec_list, fts_list])
     else:
-        # FTS path (no embedder)
-        rows = search_entities_fts(conn, query, limit=max_results * 3)
-        candidates = [_row_to_dict(r) for r in rows]
+        candidates = vec_list or fts_list
 
     # Step 2: type filter
     if entity_type:
@@ -804,3 +820,39 @@ def reconcile_registry_deletions(conn, *, registry_path: str | None = None,
     conn.commit()
     return {"deleted_detected": len(deleted),
             "queued_for_review": queued, "auto_pruned": pruned}
+
+
+def ensure_registered_project_entities(conn, *, registry_path: str | None = None) -> list[str]:
+    """Ensure every registered project has a project entity node.
+
+    Fixes the gap where a project is discussed (its decisions/tasks exist) but
+    no project node was emitted, so it is missing from active_projects / trace.
+    Creates a minimal node (day_count=2 so it is not provisional). Returns the
+    list of newly-created entity ids.
+    """
+    import datetime
+
+    from knowledge_weaver.extractor import generate_entity_id
+    from knowledge_weaver.registry import load_registry
+
+    path = registry_path or os.environ.get(
+        "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/root/.openclaw/workspace/MEMORY.md"
+    )
+    today = datetime.date.today().isoformat()
+    created: list[str] = []
+    for e in load_registry(path):
+        eid = generate_entity_id("project", e.canonical_name)
+        if get_entity(conn, eid) is not None:
+            continue
+        from knowledge_weaver.db import insert_entity
+        insert_entity(conn, {
+            "id": eid, "type": "project", "name": e.canonical_name,
+            "summary": f"项目（注册表登记）：{e.canonical_name}",
+            "importance": 0.5, "first_seen": today, "last_seen": today,
+            "day_count": 2,  # >= PROJECT_MIN_DAYS so not provisional
+            "metadata": json.dumps({"aliases": e.aliases, "source": "registry"},
+                                   ensure_ascii=False),
+        }, auto_commit=False)
+        created.append(eid)
+    conn.commit()
+    return created

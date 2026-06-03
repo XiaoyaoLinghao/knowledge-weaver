@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import struct
 from typing import Optional
@@ -212,6 +213,70 @@ def _migrate_vectors_to_vec(conn: sqlite3.Connection) -> None:
     logger.info("Migrated %d vectors to sqlite-vec virtual table", len(rows))
 
 
+# --- Chinese-aware FTS tokenization (jieba) -------------------------------- #
+# fts5's unicode61 tokenizer does NOT segment Chinese, so a CJK query matches
+# poorly. We pre-segment indexed text AND queries with jieba (space-joined),
+# which unicode61 then splits on — mirroring the TDAM approach.
+_jieba_mod = None
+_jieba_tried = False
+
+
+def _get_jieba():
+    global _jieba_mod, _jieba_tried
+    if not _jieba_tried:
+        _jieba_tried = True
+        try:
+            import jieba  # noqa: PLC0415
+            jieba.setLogLevel(60)  # silence jieba's logging
+            _jieba_mod = jieba
+        except Exception:
+            _jieba_mod = None
+    return _jieba_mod
+
+
+def jieba_tokenize(text: Optional[str]) -> str:
+    """Space-join jieba search tokens (falls back to original text)."""
+    if not text:
+        return text or ""
+    j = _get_jieba()
+    if j is None:
+        return text
+    try:
+        return " ".join(t for t in j.cut_for_search(text) if t.strip())
+    except Exception:
+        return text
+
+
+def build_fts_match(query: str) -> str:
+    """Build an FTS5 MATCH expression from a query (jieba tokens OR-joined)."""
+    j = _get_jieba()
+    if j is not None:
+        try:
+            toks = [t.strip() for t in j.cut_for_search(query) if t.strip()]
+        except Exception:
+            toks = re.findall(r"[\w]+", query)
+    else:
+        toks = re.findall(r"[\w]+", query)
+    toks = list(dict.fromkeys(toks))  # dedup, preserve order
+    if not toks:
+        return query
+    return " OR ".join('"' + t.replace('"', "") + '"' for t in toks)
+
+
+def rebuild_fts(conn: sqlite3.Connection, auto_commit: bool = True) -> int:
+    """Re-index entity_fts with jieba-segmented name/summary (one-off migration)."""
+    conn.execute("DELETE FROM entity_fts")
+    rows = conn.execute("SELECT id, name, summary, type FROM entities").fetchall()
+    for r in rows:
+        conn.execute(
+            "INSERT INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
+            (r["id"], jieba_tokenize(r["name"]), jieba_tokenize(r["summary"]), r["type"]),
+        )
+    if auto_commit:
+        conn.commit()
+    return len(rows)
+
+
 def _init_fts_table(conn: sqlite3.Connection) -> None:
     """Create FTS5 virtual table and rebuild index from existing entities."""
     conn.execute(
@@ -285,7 +350,7 @@ def insert_entity(conn: sqlite3.Connection, entity: dict, auto_commit: bool = Tr
         conn.execute("DELETE FROM entity_fts WHERE entity_id=?", (e["id"],))
         conn.execute(
             "INSERT INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
-            (e["id"], e["name"], e["summary"], e["type"]),
+            (e["id"], jieba_tokenize(e["name"]), jieba_tokenize(e["summary"]), e["type"]),
         )
     except Exception:
         pass  # FTS table may not exist yet
@@ -530,7 +595,7 @@ def search_entities_fts(
                JOIN entities e ON f.entity_id = e.id
                WHERE entity_fts MATCH ?
                ORDER BY f.rank LIMIT ?""",
-            (query, limit),
+            (build_fts_match(query), limit),
         ).fetchall()
         if rows:
             return rows

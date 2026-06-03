@@ -438,13 +438,19 @@ def run_consolidation_cli() -> int:
     # W1/B: reconcile registry deletions (snapshot diff) on the production path.
     try:
         from knowledge_weaver.db import init_db
-        from knowledge_weaver.tools import reconcile_registry_deletions
+        from knowledge_weaver.tools import (
+            ensure_registered_project_entities,
+            reconcile_registry_deletions,
+        )
         _conn = init_db(DB_PATH)
         try:
             rc = reconcile_registry_deletions(_conn)
             if rc["deleted_detected"]:
                 print(f"  Registry reconcile: auto-pruned {len(rc['auto_pruned'])}, "
                       f"queued {len(rc['queued_for_review'])} for review")
+            created = ensure_registered_project_entities(_conn)
+            if created:
+                print(f"  Created {len(created)} registered-project node(s)")
         finally:
             _conn.close()
     except Exception as exc:
