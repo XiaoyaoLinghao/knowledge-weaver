@@ -202,3 +202,128 @@ def test_get_entity_vector_roundtrip(temp_db_path):
     assert abs(got[0] - 0.9) < 1e-6
     assert get_entity_vector(conn, "proj:missing") is None
     conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# Review-time merge of existing entities + rollback                            #
+# --------------------------------------------------------------------------- #
+def test_merge_existing_entities(temp_db_path):
+    import json as _j
+
+    from knowledge_weaver.db import (
+        get_entity,
+        get_relations_for_entity,
+        insert_relation,
+        merge_existing_entities,
+    )
+    from knowledge_weaver.linker import generate_relation_id
+
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "proj:b", "project", "BravoCanonical", "canonical", BASE)
+    _add_entity(conn, "proj:a", "project", "Bravo别名", "alias dup", _vec_at_cos(0.95))
+    _add_entity(conn, "proj:c", "project", "Charlie", "other", _vec_at_cos(0.3))
+    insert_relation(conn, {
+        "id": generate_relation_id("proj:a", "proj:c", "RELATES_TO"),
+        "from_entity": "proj:a", "to_entity": "proj:c", "rel_type": "RELATES_TO",
+        "weight": 1.0, "evidence": "co_occurrence",
+    })
+
+    assert merge_existing_entities(conn, "proj:a", "proj:b", reason="test")
+    assert get_entity(conn, "proj:a") is None  # merged away
+    b = get_entity(conn, "proj:b")
+    assert "Bravo别名" in _j.loads(b["metadata"] or "{}").get("aliases", [])
+    rels = get_relations_for_entity(conn, "proj:b")
+    assert any(r["to_entity"] == "proj:c" for r in rels)  # relation repointed
+    assert conn.execute("SELECT COUNT(*) FROM merge_log").fetchone()[0] == 1
+    conn.close()
+
+
+def test_rollback_merge(temp_db_path):
+    import json as _j
+
+    from knowledge_weaver.db import get_entity, merge_existing_entities, rollback_merge
+
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "proj:b", "project", "Canonical", "c", BASE)
+    _add_entity(conn, "proj:a", "project", "Dup", "d", _vec_at_cos(0.95))
+    merge_existing_entities(conn, "proj:a", "proj:b", reason="test")
+    assert get_entity(conn, "proj:a") is None
+
+    log_id = conn.execute("SELECT id FROM merge_log ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert rollback_merge(conn, log_id)
+    assert get_entity(conn, "proj:a") is not None
+    b = get_entity(conn, "proj:b")
+    assert "Dup" not in _j.loads(b["metadata"] or "{}").get("aliases", [])
+    conn.close()
+
+
+def test_resolve_review_merge(temp_db_path):
+    from knowledge_weaver.db import count_pending_reviews, get_entity
+    from knowledge_weaver.tools import resolve_review
+
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "proj:b", "project", "Canonical", "c", BASE)
+    _add_entity(conn, "proj:a", "project", "Dup", "d", _vec_at_cos(0.95))
+    rid = insert_review(conn, kind="merge", new_entity_id="proj:a",
+                        candidate_id="proj:b", entity_type="project",
+                        score=0.85, reason="review:vector")
+    out = resolve_review(conn, review_id=rid, action="merge")
+    assert out["ok"] and out["action"] == "merged"
+    assert get_entity(conn, "proj:a") is None
+    assert count_pending_reviews(conn) == 0
+    conn.close()
+
+
+def test_resolve_review_reject_keeps_both(temp_db_path):
+    from knowledge_weaver.db import count_pending_reviews, get_entity
+    from knowledge_weaver.tools import resolve_review
+
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "proj:b", "project", "Canonical", "c", BASE)
+    _add_entity(conn, "proj:a", "project", "MaybeDup", "d", _vec_at_cos(0.85))
+    rid = insert_review(conn, kind="merge", new_entity_id="proj:a",
+                        candidate_id="proj:b", entity_type="project",
+                        score=0.85, reason="review:vector")
+    out = resolve_review(conn, review_id=rid, action="reject")
+    assert out["action"] == "kept_separate"
+    assert get_entity(conn, "proj:a") is not None
+    assert get_entity(conn, "proj:b") is not None
+    assert count_pending_reviews(conn) == 0
+    conn.close()
+
+
+def test_reconcile_registry_detects_deletion(temp_db_path, tmp_path):
+    from knowledge_weaver.db import count_pending_reviews, insert_entity as _ie, \
+        snapshot_registered_slugs
+    from knowledge_weaver.extractor import generate_entity_id
+    from knowledge_weaver.tools import reconcile_registry_deletions
+
+    conn = init_db(temp_db_path)
+    alpha = generate_entity_id("project", "Alpha")
+    beta = generate_entity_id("project", "Beta")
+    _ie(conn, {"id": beta, "type": "project", "name": "Beta", "summary": "s",
+               "importance": 0.5, "first_seen": "2026-01-01",
+               "last_seen": "2026-01-01", "day_count": 5})
+    snapshot_registered_slugs(conn, {alpha, beta})  # baseline has both
+
+    reg = tmp_path / "MEMORY.md"
+    reg.write_text("# M\n\n## 项目标准\n\n- **Alpha** `slug: alpha`\n", encoding="utf-8")
+    out = reconcile_registry_deletions(conn, registry_path=str(reg), min_day_count=3)
+    assert beta in out["queued_for_review"]
+    assert count_pending_reviews(conn) == 1
+    conn.close()
+
+
+def test_calibrate_resolution(temp_db_path):
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    from calibrate_resolution import calibrate
+
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "proj:a", "project", "Alpha", "a", _vec_at_cos(1.0))
+    _add_entity(conn, "proj:b", "project", "Alpha2", "b", _vec_at_cos(0.97))
+    conn.close()
+    s = calibrate(temp_db_path)
+    assert s["vectors"] == 2
+    assert s["top_pairs"] and s["top_pairs"][0][0] >= 0.95

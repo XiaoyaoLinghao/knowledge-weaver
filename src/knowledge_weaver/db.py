@@ -391,6 +391,135 @@ def record_merge(conn: sqlite3.Connection, *, merged_from_id: str,
         conn.commit()
 
 
+def get_review(conn: sqlite3.Connection, review_id: int) -> Optional[sqlite3.Row]:
+    return conn.execute("SELECT * FROM merge_review WHERE id=?", (review_id,)).fetchone()
+
+
+def clean_entity_indexes(conn: sqlite3.Connection, entity_id: str) -> None:
+    """Remove an entity's FTS + vector index rows (entity row handled separately)."""
+    for sql in (
+        "DELETE FROM entity_fts WHERE entity_id=?",
+        "DELETE FROM entity_vectors WHERE entity_id=?",
+        "DELETE FROM entity_vec WHERE entity_id=?",
+    ):
+        try:
+            conn.execute(sql, (entity_id,))
+        except Exception:
+            pass
+
+
+def merge_existing_entities(conn: sqlite3.Connection, from_id: str, into_id: str, *,
+                            reason: str = "manual", score: float = 0.0,
+                            auto_commit: bool = True) -> bool:
+    """Merge an existing entity ``from_id`` INTO ``into_id`` (into stays canonical).
+
+    Unions source_lines + aliases, repoints relations, removes from_id's row +
+    indexes, and writes a rollback snapshot (entity + its relations) to merge_log.
+    """
+    src = get_entity(conn, from_id)
+    dst = get_entity(conn, into_id)
+    if src is None or dst is None or from_id == into_id:
+        return False
+
+    rels = [dict(r) for r in get_relations_for_entity(conn, from_id)]
+    snapshot = json.dumps({"entity": dict(src), "relations": rels}, ensure_ascii=False)
+
+    src_sources = json.loads(src["source_lines"] or "[]")
+    dst_sources = json.loads(dst["source_lines"] or "[]")
+    merged_sources = list(dict.fromkeys(dst_sources + src_sources))
+
+    dst_meta = json.loads(dst["metadata"] or "{}")
+    src_meta = json.loads(src["metadata"] or "{}")
+    aliases = list(dst_meta.get("aliases", []))
+    for a in [src["name"]] + list(src_meta.get("aliases", [])):
+        if a and a != dst["name"] and a not in aliases:
+            aliases.append(a)
+    if aliases:
+        dst_meta["aliases"] = aliases
+
+    conn.execute(
+        "UPDATE entities SET source_lines=?, metadata=?, importance=?, "
+        "first_seen=MIN(first_seen, ?), day_count=day_count+?, "
+        "updated_at=datetime('now') WHERE id=?",
+        (json.dumps(merged_sources, ensure_ascii=False),
+         json.dumps(dst_meta, ensure_ascii=False),
+         max(src["importance"], dst["importance"]),
+         src["first_seen"], src["day_count"], into_id),
+    )
+
+    from knowledge_weaver.linker import generate_relation_id
+    for r in rels:
+        nf = into_id if r["from_entity"] == from_id else r["from_entity"]
+        nt = into_id if r["to_entity"] == from_id else r["to_entity"]
+        if nf == nt:
+            continue
+        insert_relation(conn, {
+            "id": generate_relation_id(nf, nt, r["rel_type"]),
+            "from_entity": nf, "to_entity": nt, "rel_type": r["rel_type"],
+            "weight": r.get("weight", 1.0), "evidence": r.get("evidence", ""),
+        }, auto_commit=False)
+
+    delete_entity(conn, from_id, auto_commit=False)  # also drops from_id's relations
+    clean_entity_indexes(conn, from_id)
+    record_merge(conn, merged_from_id=from_id, merged_into_id=into_id,
+                 reason=reason, score=score, from_snapshot=snapshot, auto_commit=False)
+    if auto_commit:
+        conn.commit()
+    return True
+
+
+def rollback_merge(conn: sqlite3.Connection, log_id: int,
+                   auto_commit: bool = True) -> bool:
+    """Undo a merge: recreate the merged-away entity + relations from snapshot,
+    and drop its alias from the surviving entity. (Vector needs re-embed.)"""
+    row = conn.execute(
+        "SELECT merged_into_id, from_snapshot FROM merge_log WHERE id=?", (log_id,)
+    ).fetchone()
+    if not row or not row[1]:
+        return False
+    snap = json.loads(row[1])
+    ent = snap.get("entity")
+    if not ent:
+        return False
+    insert_entity(conn, {k: ent[k] for k in (
+        "id", "type", "name", "summary", "importance", "first_seen",
+        "last_seen", "day_count", "source_lines", "metadata")}, auto_commit=False)
+    for r in snap.get("relations", []):
+        insert_relation(conn, r, auto_commit=False)
+    into_id = row[0]
+    if into_id:
+        dst = get_entity(conn, into_id)
+        if dst:
+            meta = json.loads(dst["metadata"] or "{}")
+            aliases = [a for a in meta.get("aliases", []) if a != ent.get("name")]
+            if aliases:
+                meta["aliases"] = aliases
+            else:
+                meta.pop("aliases", None)
+            conn.execute("UPDATE entities SET metadata=? WHERE id=?",
+                         (json.dumps(meta, ensure_ascii=False), into_id))
+    if auto_commit:
+        conn.commit()
+    return True
+
+
+def previous_registered_slugs(conn: sqlite3.Connection) -> set[str]:
+    """Slugs recorded in the last registry snapshot (empty on first run)."""
+    return {r[0] for r in conn.execute("SELECT slug FROM registry_snapshot").fetchall()}
+
+
+def snapshot_registered_slugs(conn: sqlite3.Connection, slugs: set[str],
+                              auto_commit: bool = True) -> None:
+    """Replace the registry snapshot with the current registered slug set."""
+    conn.execute("DELETE FROM registry_snapshot")
+    conn.executemany(
+        "INSERT OR IGNORE INTO registry_snapshot(slug) VALUES (?)",
+        [(s,) for s in slugs],
+    )
+    if auto_commit:
+        conn.commit()
+
+
 def search_entities_fts(
     conn: sqlite3.Connection, query: str, limit: int = 10
 ) -> list[sqlite3.Row]:

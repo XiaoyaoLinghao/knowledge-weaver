@@ -67,7 +67,7 @@ def seeded_conn(temp_db_path):
 # ---------------------------------------------------------------------------
 
 def test_create_server():
-    """Server created successfully with 7 tools."""
+    """Server created successfully with all tools (incl. W1 review tools)."""
     from knowledge_weaver.server import create_server
     mcp = create_server()
 
@@ -82,9 +82,13 @@ def test_create_server():
         "decision_history",
         "knowledge_stats",
         "knowledge_consolidate",
+        # W1 entity-resolution review queue
+        "kw_review_pending",
+        "kw_resolve",
+        "kw_reconcile_registry",
     }
     assert tool_names == expected, f"Expected {expected}, got {tool_names}"
-    assert len(tools) == 7
+    assert len(tools) == 10
 
 
 def test_env_config(monkeypatch):

@@ -355,6 +355,68 @@ def create_server() -> FastMCP:
             conn.close()
         return json.dumps(result, ensure_ascii=False, indent=2, default=str)
 
+    # --- W1: entity-resolution review queue ---
+    @mcp.tool()
+    async def kw_review_pending(limit: int = 50) -> str:
+        """List pending entity-merge / registry-purge items awaiting your confirmation.
+
+        The resolver auto-merges only high-confidence duplicates; uncertain
+        candidates (and projects removed from the registry) are queued here
+        instead of being merged/deleted silently. Review them, then call
+        kw_resolve. Pending items never block ingestion.
+
+        Args:
+            limit: Max items to return (default 50).
+        """
+        from knowledge_weaver.tools import review_pending as _rp
+        conn = _get_conn()
+        try:
+            result = _rp(conn, limit=_clamp(limit, 1, 200))
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
+        finally:
+            conn.close()
+        return json.dumps(result, ensure_ascii=False)
+
+    @mcp.tool()
+    async def kw_resolve(review_id: int, action: str) -> str:
+        """Resolve one review item from kw_review_pending.
+
+        Args:
+            review_id: The review_id from kw_review_pending.
+            action: For a merge item: "merge" to combine the two entities, or
+                "reject" to keep them separate. For a purge item: "purge" to
+                delete the entity, or "keep" to keep it. Merges and purges are
+                logged and can be rolled back.
+        """
+        from knowledge_weaver.tools import resolve_review as _rr
+        conn = _get_conn()
+        try:
+            result = _rr(conn, review_id=review_id, action=action)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
+        finally:
+            conn.close()
+        return json.dumps(result, ensure_ascii=False)
+
+    @mcp.tool()
+    async def kw_reconcile_registry() -> str:
+        """Detect projects removed from the MEMORY.md registry and reconcile them.
+
+        Diffs the current registry against the last snapshot; low-value removed
+        entities are auto-pruned, established ones are queued in kw_review_pending
+        for confirmation. The first run only establishes the baseline.
+        """
+        from knowledge_weaver.tools import reconcile_registry_deletions as _rc
+        conn = _get_conn()
+        try:
+            result = _rc(conn)
+        except Exception as exc:
+            return json.dumps({"error": str(exc), "isError": True}, ensure_ascii=False)
+        finally:
+            conn.close()
+        return json.dumps(result, ensure_ascii=False)
+
     return mcp
 
 
@@ -372,6 +434,22 @@ def run_consolidation_cli() -> int:
         print("Running consolidation without embeddings (vector search will be unavailable).")
 
     result = _run(DB_PATH, memory_dirs=MEMORY_DIRS, embedder=embedder)
+
+    # W1/B: reconcile registry deletions (snapshot diff) on the production path.
+    try:
+        from knowledge_weaver.db import init_db
+        from knowledge_weaver.tools import reconcile_registry_deletions
+        _conn = init_db(DB_PATH)
+        try:
+            rc = reconcile_registry_deletions(_conn)
+            if rc["deleted_detected"]:
+                print(f"  Registry reconcile: auto-pruned {len(rc['auto_pruned'])}, "
+                      f"queued {len(rc['queued_for_review'])} for review")
+        finally:
+            _conn.close()
+    except Exception as exc:
+        print(f"  Registry reconcile skipped: {exc}")
+
     print(f"Consolidation: {result.status}")
     print(f"  Sources: {len(MEMORY_DIRS)}")
     for name, path in MEMORY_DIRS:

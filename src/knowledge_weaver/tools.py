@@ -674,3 +674,133 @@ def knowledge_stats(conn) -> dict:
         "relation_density_by_type": rel_density,
         "entity_counts_by_source": source_counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# W1: entity-resolution review queue + registry-deletion reconcile
+# ---------------------------------------------------------------------------
+def review_pending(conn, *, limit: int = 50) -> dict:
+    """List pending merge/purge review items (for human confirmation)."""
+    from knowledge_weaver.db import count_pending_reviews, list_pending_reviews
+
+    items = []
+    for r in list_pending_reviews(conn, limit=limit):
+        new = get_entity(conn, r["new_entity_id"])
+        cand = get_entity(conn, r["candidate_id"]) if r["candidate_id"] else None
+        items.append({
+            "review_id": r["id"],
+            "kind": r["kind"],
+            "score": r["score"],
+            "reason": r["reason"],
+            "new": {
+                "id": r["new_entity_id"],
+                "name": new["name"] if new else None,
+                "summary": new["summary"][:120] if new else None,
+            },
+            "candidate": (
+                {
+                    "id": r["candidate_id"],
+                    "name": cand["name"] if cand else None,
+                    "summary": cand["summary"][:120] if cand else None,
+                }
+                if r["candidate_id"]
+                else None
+            ),
+        })
+    return {"pending": items, "count": count_pending_reviews(conn)}
+
+
+def resolve_review(conn, *, review_id: int, action: str) -> dict:
+    """Resolve a pending review item.
+
+    merge-kind: action in {merge|confirm|yes} -> merge new_entity into candidate;
+                otherwise -> keep separate (reject).
+    purge-kind: action in {purge|delete|yes}  -> delete the entity;
+                otherwise -> keep.
+    """
+    from knowledge_weaver.db import (
+        clean_entity_indexes,
+        delete_entity,
+        get_review,
+        merge_existing_entities,
+        record_merge,
+        set_review_status,
+    )
+
+    r = get_review(conn, review_id)
+    if r is None or r["status"] != "pending":
+        return {"ok": False, "error": "review not found or already resolved"}
+    act = (action or "").strip().lower()
+
+    if r["kind"] == "merge":
+        if act in ("merge", "confirm", "yes", "y"):
+            ok = merge_existing_entities(
+                conn, r["new_entity_id"], r["candidate_id"],
+                reason="review:confirmed", score=r["score"], auto_commit=False,
+            )
+            set_review_status(conn, review_id, "merged" if ok else "rejected",
+                              auto_commit=False)
+            conn.commit()
+            return {"ok": ok, "action": "merged",
+                    "from": r["new_entity_id"], "into": r["candidate_id"]}
+        set_review_status(conn, review_id, "rejected")
+        return {"ok": True, "action": "kept_separate"}
+
+    # purge-kind
+    if act in ("purge", "delete", "yes", "y"):
+        ent = get_entity(conn, r["new_entity_id"])
+        snap = json.dumps({"entity": dict(ent)} if ent else {}, ensure_ascii=False)
+        record_merge(conn, merged_from_id=r["new_entity_id"], merged_into_id=None,
+                     reason="review:purged", score=0.0, from_snapshot=snap,
+                     auto_commit=False)
+        delete_entity(conn, r["new_entity_id"], auto_commit=False)
+        clean_entity_indexes(conn, r["new_entity_id"])
+        set_review_status(conn, review_id, "purged", auto_commit=False)
+        conn.commit()
+        return {"ok": True, "action": "purged", "entity": r["new_entity_id"]}
+    set_review_status(conn, review_id, "kept")
+    return {"ok": True, "action": "kept"}
+
+
+def reconcile_registry_deletions(conn, *, registry_path: str | None = None,
+                                 min_day_count: int = 3) -> dict:
+    """Detect projects removed from the MEMORY.md registry (snapshot diff) and
+    either auto-prune (low value) or queue for review (established entity).
+
+    First run only establishes the baseline snapshot (no deletions inferred).
+    """
+    from knowledge_weaver.db import (
+        clean_entity_indexes,
+        delete_entity,
+        insert_review,
+        previous_registered_slugs,
+        snapshot_registered_slugs,
+    )
+    from knowledge_weaver.registry import load_registry, registered_slugs
+
+    path = registry_path or os.environ.get(
+        "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/root/.openclaw/workspace/MEMORY.md"
+    )
+    current = registered_slugs(load_registry(path))
+    previous = previous_registered_slugs(conn)
+    deleted = (previous - current) if previous else set()
+
+    queued, pruned = [], []
+    for slug in deleted:
+        ent = get_entity(conn, slug)
+        if ent is None:
+            continue
+        if ent["day_count"] >= min_day_count:
+            insert_review(conn, kind="purge", new_entity_id=slug, candidate_id=None,
+                          entity_type=ent["type"], score=0.0,
+                          reason="registry-deleted", auto_commit=False)
+            queued.append(slug)
+        else:
+            delete_entity(conn, slug, auto_commit=False)
+            clean_entity_indexes(conn, slug)
+            pruned.append(slug)
+
+    snapshot_registered_slugs(conn, current, auto_commit=False)
+    conn.commit()
+    return {"deleted_detected": len(deleted),
+            "queued_for_review": queued, "auto_pruned": pruned}
