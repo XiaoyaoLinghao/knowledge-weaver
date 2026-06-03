@@ -107,6 +107,25 @@ def build_typing_system_prompt() -> str:
     )
 
 
+def reset_llm_typed_edges(conn, auto_commit: bool = True) -> int:
+    """Convert previously LLM-typed edges (evidence='llm-typed') back to
+    RELATES_TO so they can be re-typed with an updated prompt. Preserves the
+    original DEPENDS_ON / co-occurrence edges (different evidence)."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, from_entity, to_entity, weight FROM relations "
+        "WHERE evidence='llm-typed'").fetchall()]
+    for r in rows:
+        conn.execute("DELETE FROM relations WHERE id=?", (r["id"],))
+        insert_relation(conn, {
+            "id": generate_relation_id(r["from_entity"], r["to_entity"], "RELATES_TO"),
+            "from_entity": r["from_entity"], "to_entity": r["to_entity"],
+            "rel_type": "RELATES_TO", "weight": r["weight"], "evidence": "co_occurrence",
+        }, auto_commit=False)
+    if auto_commit:
+        conn.commit()
+    return len(rows)
+
+
 def llm_type_pairs(cands: list[dict], *, api_url: str, api_key: str, model: str,
                    chunk: int = 20, timeout: float = 90.0) -> dict:
     """Type candidate edges via an OpenAI-compatible chat model (chunked)."""

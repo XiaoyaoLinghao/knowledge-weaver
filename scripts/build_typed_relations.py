@@ -16,15 +16,29 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from knowledge_weaver.typed_relations import llm_type_pairs, type_relations  # noqa: E402
+from knowledge_weaver.db import init_db  # noqa: E402
+from knowledge_weaver.typed_relations import (  # noqa: E402
+    llm_type_pairs,
+    reset_llm_typed_edges,
+    type_relations,
+)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="W3.4 type RELATES_TO edges into a knowledge graph")
     ap.add_argument("db_path")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--reset", action="store_true",
+                    help="first revert previously LLM-typed edges back to RELATES_TO "
+                         "(to re-type with an updated prompt)")
     ap.add_argument("--chunk", type=int, default=20)
     args = ap.parse_args()
+
+    if args.reset and not args.dry_run:
+        _c = init_db(args.db_path)
+        n = reset_llm_typed_edges(_c)
+        _c.close()
+        print(f"reset {n} previously-typed edge(s) back to RELATES_TO")
 
     api_url = os.environ.get("KW_REL_API_URL")
     api_key = os.environ.get("KW_REL_API_KEY")
