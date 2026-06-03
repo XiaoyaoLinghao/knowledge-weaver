@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import re
 from typing import Optional
 
 from knowledge_weaver.db import (
@@ -48,6 +49,31 @@ def _env_float(name: str, default: float) -> float:
 RESOLVE_HIGH = _env_float("KNOWLEDGE_WEAVER_RESOLVE_HIGH", 0.90)
 RESOLVE_MID = _env_float("KNOWLEDGE_WEAVER_RESOLVE_MID", 0.82)
 NAME_HIGH = _env_float("KNOWLEDGE_WEAVER_RESOLVE_NAME_HIGH", 0.85)
+
+# Structured identifiers (version numbers, course/product codes, paths, filenames)
+# get spuriously high bge-m3 cosine even when they denote *different* things
+# (real-data finding: v0.2.0 vs v2.9.0 cosine 0.90; COMP7940 vs COMP7240 = 1.0).
+# For these, a vector-only match is unreliable -> demote to review, never auto-merge.
+# (True duplicates of an identifier share the same name -> same id -> exact-id path,
+# so two *different* identifier names reaching the resolver are almost always distinct.)
+_IDENTIFIER_RE = re.compile(
+    r"^v?\d+(?:[._]\d+)+$"      # version: v0.2.0 / 1.2 / 0.2.0
+    r"|^[A-Za-z]{2,}\d{2,}$"    # code: COMP7940 / ABC123
+    r"|[/\\]"                   # path separator
+    r"|\.\w{1,5}$"              # file extension: .py / .md / .json
+)
+
+
+def _merge_unreliable(name: str) -> bool:
+    """True if a name is too short / identifier-like for either cosine OR name
+    similarity to be trusted for auto-merge.
+
+    Both signals fail on structured identifiers: cosine (bge-m3 over-similarity)
+    AND SequenceMatcher (COMP7940 vs COMP7240 ratio 0.875 >= NAME_HIGH, yet they
+    are different course codes). Such cases are demoted to human review.
+    """
+    n = (name or "").strip()
+    return len(n) <= 3 or bool(_IDENTIFIER_RE.search(n))
 CANDIDATE_K = 10
 
 
@@ -139,11 +165,21 @@ def resolve_entity(
             if cvec:
                 cos = _cosine(query_vec, cvec)
 
-        if name_ratio >= NAME_HIGH or cos >= RESOLVE_HIGH:
+        strong_name = name_ratio >= NAME_HIGH
+        strong_vec = cos >= RESOLVE_HIGH
+        unreliable = _merge_unreliable(name) or _merge_unreliable(cand_name)
+
+        if (strong_name or strong_vec) and not unreliable:
             s = max(name_ratio, cos)
             if s > merge_score:
                 merge_id, merge_score = cid, s
-                merge_reason = "name" if name_ratio >= NAME_HIGH else "vector"
+                merge_reason = "name" if strong_name else "vector"
+        elif strong_name or strong_vec:
+            # Strong signal but identifier-like / too short -> human review,
+            # never auto-merge (both cosine and name ratio are unreliable here).
+            s = max(name_ratio, cos)
+            if s > review_score:
+                review_id, review_score = cid, s
         elif cos >= RESOLVE_MID:
             if cos > review_score:
                 review_id, review_score = cid, cos

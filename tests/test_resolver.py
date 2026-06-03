@@ -327,3 +327,57 @@ def test_calibrate_resolution(temp_db_path):
     s = calibrate(temp_db_path)
     assert s["vectors"] == 2
     assert s["top_pairs"] and s["top_pairs"][0][0] >= 0.95
+
+
+# --------------------------------------------------------------------------- #
+# Identifier guard (real-data finding: short structured ids over-merge)        #
+# --------------------------------------------------------------------------- #
+def test_version_identifier_demoted_to_review(temp_db_path):
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "tech:v2_9_0", "tech", "v2.9.0", "tool A version", BASE)
+    emb = MockEmbedder({"kw version": _vec_at_cos(0.95)})
+    res = resolve_entity(conn, new_id="tech:v0_2_0", entity_type="tech",
+                         name="v0.2.0", summary="kw version", embedder=emb)
+    assert res.action == "review"  # identifier guard blocks auto-merge
+    conn.close()
+
+
+def test_course_code_demoted_to_review(temp_db_path):
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "tech:comp7240", "tech", "COMP7240", "a course", BASE)
+    emb = MockEmbedder({"another course": _vec_at_cos(0.99)})
+    res = resolve_entity(conn, new_id="tech:comp7940", entity_type="tech",
+                         name="COMP7940", summary="another course", embedder=emb)
+    assert res.action == "review"
+    conn.close()
+
+
+def test_filename_demoted_to_review(temp_db_path):
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "tech:a", "tech", "test_registry.py", "a test file", BASE)
+    emb = MockEmbedder({"another file": _vec_at_cos(0.96)})
+    res = resolve_entity(conn, new_id="tech:b", entity_type="tech",
+                         name="utils.py", summary="another file", embedder=emb)
+    assert res.action == "review"
+    conn.close()
+
+
+def test_short_name_demoted_to_review(temp_db_path):
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "tech:x1", "tech", "AI", "a field", BASE)
+    emb = MockEmbedder({"ml field": _vec_at_cos(0.95)})
+    res = resolve_entity(conn, new_id="tech:x2", entity_type="tech",
+                         name="ML", summary="ml field", embedder=emb)
+    assert res.action == "review"  # len("ML") <= 3
+    conn.close()
+
+
+def test_real_word_vector_still_merges(temp_db_path):
+    """Non-identifier words with high cosine still auto-merge (the cross-language case)."""
+    conn = init_db(temp_db_path)
+    _add_entity(conn, "tech:homebrain", "tech", "HomeBrain", "smart home hub", BASE)
+    emb = MockEmbedder({"jiating danao": _vec_at_cos(0.95)})
+    res = resolve_entity(conn, new_id="tech:jiatingdanao", entity_type="tech",
+                         name="家庭大脑", summary="jiating danao", embedder=emb)
+    assert res.action == "merge" and res.reason == "auto:vector"
+    conn.close()
