@@ -54,3 +54,13 @@ def schema_prompt() -> str:
     for t in REL_TYPES:
         lines.append(f"  {t}：{REL_DESC[t]}")
     return "\n".join(lines)
+
+
+def triplet_hints_prompt() -> str:
+    """Render typical (from_type → to_type) combos per relation, to bias the LLM
+    toward specific structural types instead of the weak 相关 fallback."""
+    lines = []
+    for rel, pairs in TRIPLET_HINTS.items():
+        combos = "、".join(f"{a}→{b}" for a, b in pairs[:4])
+        lines.append(f"  {rel}：{combos}")
+    return "\n".join(lines)

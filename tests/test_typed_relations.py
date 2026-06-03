@@ -77,3 +77,36 @@ def test_schema_prompt_lists_all_types():
     p = schema_prompt()
     for t in REL_TYPES:
         assert t in p
+
+
+def test_typing_prompt_tightened():
+    from knowledge_weaver.typed_relations import build_typing_system_prompt
+    p = build_typing_system_prompt()
+    for t in REL_TYPES:
+        assert t in p                      # all 8 types listed
+    assert "真正的因果" in p               # 导致 tightened (causation-only)
+    assert "优先" in p                     # prefer specific types
+    assert "none" in p                     # prune coincidental
+    assert "⇒ 使用" in p                   # few-shot examples present
+    assert "project→tech" in p             # triplet hints injected
+
+
+def test_reset_llm_typed_edges(temp_db_path):
+    from knowledge_weaver.db import init_db, insert_entity, insert_relation
+    from knowledge_weaver.typed_relations import reset_llm_typed_edges
+    conn = init_db(temp_db_path)
+    for eid, t, n in [("proj:a", "project", "A"), ("tech:b", "tech", "B"), ("proj:c", "project", "C")]:
+        insert_entity(conn, {"id": eid, "type": t, "name": n, "summary": n,
+                             "importance": 0.5, "first_seen": "2026-01-01", "last_seen": "2026-01-01"})
+    insert_relation(conn, {"id": generate_relation_id("proj:a", "tech:b", "使用"),
+                           "from_entity": "proj:a", "to_entity": "tech:b", "rel_type": "使用",
+                           "weight": 1.0, "evidence": "llm-typed"})
+    insert_relation(conn, {"id": generate_relation_id("proj:a", "proj:c", "DEPENDS_ON"),
+                           "from_entity": "proj:a", "to_entity": "proj:c", "rel_type": "DEPENDS_ON",
+                           "weight": 1.0, "evidence": "co_occurrence"})
+    assert reset_llm_typed_edges(conn) == 1
+    rels = {(x["from_entity"], x["to_entity"], x["rel_type"])
+            for x in conn.execute("SELECT * FROM relations").fetchall()}
+    assert ("proj:a", "tech:b", "RELATES_TO") in rels   # llm-typed reverted
+    assert ("proj:a", "proj:c", "DEPENDS_ON") in rels   # original preserved
+    conn.close()
