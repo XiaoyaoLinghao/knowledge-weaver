@@ -77,3 +77,15 @@ def test_schema_prompt_lists_all_types():
     p = schema_prompt()
     for t in REL_TYPES:
         assert t in p
+
+
+def test_typing_prompt_tightened():
+    from knowledge_weaver.typed_relations import build_typing_system_prompt
+    p = build_typing_system_prompt()
+    for t in REL_TYPES:
+        assert t in p                      # all 8 types listed
+    assert "真正的因果" in p               # 导致 tightened (causation-only)
+    assert "优先" in p                     # prefer specific types
+    assert "none" in p                     # prune coincidental
+    assert "⇒ 使用" in p                   # few-shot examples present
+    assert "project→tech" in p             # triplet hints injected

@@ -14,7 +14,11 @@ from collections import Counter
 
 from knowledge_weaver.db import get_entity, init_db, insert_relation
 from knowledge_weaver.linker import generate_relation_id
-from knowledge_weaver.relations_schema import REL_TYPES, schema_prompt
+from knowledge_weaver.relations_schema import (
+    REL_TYPES,
+    schema_prompt,
+    triplet_hints_prompt,
+)
 
 
 def candidates(conn) -> list[dict]:
@@ -31,8 +35,8 @@ def candidates(conn) -> list[dict]:
         out.append({
             "rel_id": r["id"], "from_id": r["from_entity"], "to_id": r["to_entity"],
             "weight": r["weight"], "evidence": r["evidence"],
-            "from": f"{a['type']}: {a['name']} — {(a['summary'] or '')[:60]}",
-            "to": f"{b['type']}: {b['name']} — {(b['summary'] or '')[:60]}",
+            "from": f"{a['type']}: {a['name']} — {(a['summary'] or '')[:150]}",
+            "to": f"{b['type']}: {b['name']} — {(b['summary'] or '')[:150]}",
         })
     return out
 
@@ -75,6 +79,34 @@ def type_relations(db_path: str, type_fn, *, dry_run: bool = False) -> dict:
     }
 
 
+def build_typing_system_prompt() -> str:
+    """Tightened typing prompt: schema + triplet hints + rules (prefer specific
+    types; 导致 only for true causation; prune coincidental; 相关 last resort) +
+    few-shot. Pulled out so it is testable without an LLM call."""
+    return (
+        "你是知识图谱关系判定助手。给你若干有方向的实体对（A→B），"
+        "请判断每一对中 A 与 B 之间最贴切的关系类型。\n\n"
+        + schema_prompt()
+        + "\n\n常见组合参考（优先据此往具体类型判，非硬性约束）：\n"
+        + triplet_hints_prompt()
+        + "\n\n判定规则：\n"
+        "1. 优先选具体类型（依赖/使用/包含/导致/取代/关于）；只有确实找不到更具体关系、"
+        "且两者确有实质关联时，才用「相关」。\n"
+        "2. 「导致」仅用于真正的因果（A 是 B 发生的原因）；先后顺序或伴随出现【不算因果】，"
+        "应判其它类型或 none。\n"
+        "3. 若两者只是碰巧在同一段对话里出现、彼此没有实质关系 → 输出 none（剪掉），"
+        "不要塞进「相关」。\n"
+        "4. 注意方向 A→B，按内容判最贴切的类型。\n\n"
+        "示例：\n"
+        "  A(project: HomeBrain — 智能家庭中枢) → B(tech: FastAPI — 后端框架) ⇒ 使用\n"
+        "  A(decision: 改用规则引擎 — 弃用LLM聚合) → B(task: 重构聚合层) ⇒ 导致\n"
+        "  A(project: KW — 知识抽取) → B(tech: sqlite-vec — 向量库) ⇒ 依赖\n"
+        "  A(fact: 今天天气好) → B(decision: 后端用FastAPI) ⇒ none\n\n"
+        "对每一对，按其序号输出关系类型或 none；只输出一个 JSON 对象，"
+        '形如 {"1": "使用", "2": "none", ...}，不要任何其它文字。'
+    )
+
+
 def llm_type_pairs(cands: list[dict], *, api_url: str, api_key: str, model: str,
                    chunk: int = 20, timeout: float = 90.0) -> dict:
     """Type candidate edges via an OpenAI-compatible chat model (chunked)."""
@@ -83,12 +115,7 @@ def llm_type_pairs(cands: list[dict], *, api_url: str, api_key: str, model: str,
     url = api_url.rstrip("/")
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
-    sys_prompt = (
-        "你是知识图谱关系判定助手。给你若干有方向的实体对（A→B），"
-        "请判断每一对中 A 与 B 之间最贴切的关系类型。\n\n" + schema_prompt() +
-        "\n\n对每一对，按其序号输出关系类型或 none；只输出一个 JSON 对象，"
-        '形如 {"1": "依赖", "2": "none", ...}，不要任何其它文字。'
-    )
+    sys_prompt = build_typing_system_prompt()
     out: dict = {}
     for i in range(0, len(cands), chunk):
         batch = cands[i:i + chunk]
