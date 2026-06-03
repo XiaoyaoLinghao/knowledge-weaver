@@ -75,6 +75,41 @@ CREATE TABLE IF NOT EXISTS access_log (
 
 CREATE INDEX IF NOT EXISTS idx_access_log_entity ON access_log(entity_id);
 CREATE INDEX IF NOT EXISTS idx_access_log_time ON access_log(accessed_at);
+
+-- W1 Entity Resolution: human-review queue for the uncertain "middle band"
+-- (and registry-deletion purge candidates). Never blocks ingestion.
+CREATE TABLE IF NOT EXISTS merge_review (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL DEFAULT 'merge',   -- 'merge' | 'purge'
+    new_entity_id TEXT NOT NULL,                  -- the freshly-ingested entity (merge) / target (purge)
+    candidate_id TEXT,                            -- the existing entity it might merge into (merge only)
+    entity_type  TEXT,
+    score        REAL,
+    reason       TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'merged' | 'rejected' | 'purged' | 'kept'
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_merge_review_status ON merge_review(status);
+
+-- W1: rollback log for executed merges (and purges). Stores the merged-away
+-- entity snapshot so a merge can be undone.
+CREATE TABLE IF NOT EXISTS merge_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    merged_from_id TEXT NOT NULL,
+    merged_into_id TEXT,                          -- NULL for a purge
+    reason         TEXT,
+    score          REAL,
+    from_snapshot  TEXT,                          -- JSON of the removed entity (for rollback)
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- W1/B: snapshot of registered project slugs, to detect registry deletions
+-- by diffing the previous snapshot against the current registry on load.
+CREATE TABLE IF NOT EXISTS registry_snapshot (
+    slug        TEXT PRIMARY KEY,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 VECTOR_SCHEMA = """
@@ -274,6 +309,86 @@ def list_entities_by_type(conn: sqlite3.Connection, entity_type: str) -> list[sq
 def list_all_entities(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """List all entities ordered by importance DESC."""
     return conn.execute("SELECT * FROM entities ORDER BY importance DESC").fetchall()
+
+
+# ---------------------------------------------------------------------------
+# W1 Entity Resolution helpers: stored-vector lookup, review queue, merge log.
+# ---------------------------------------------------------------------------
+def get_entity_vector(conn: sqlite3.Connection, entity_id: str) -> Optional[list[float]]:
+    """Return an entity's stored embedding (for consistent cosine scoring).
+
+    Reads from entity_vectors (JSON) so the score uses the same cosine metric
+    regardless of the vec0 table's (default L2) distance metric.
+    """
+    row = conn.execute(
+        "SELECT embedding FROM entity_vectors WHERE entity_id=?", (entity_id,)
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def insert_review(conn: sqlite3.Connection, *, kind: str, new_entity_id: str,
+                  candidate_id: Optional[str], entity_type: str, score: float,
+                  reason: str, auto_commit: bool = True) -> int:
+    """Queue a merge/purge candidate for human review (idempotent per pair)."""
+    existing = conn.execute(
+        "SELECT id FROM merge_review WHERE status='pending' AND kind=? "
+        "AND new_entity_id=? AND IFNULL(candidate_id,'')=IFNULL(?,'')",
+        (kind, new_entity_id, candidate_id),
+    ).fetchone()
+    if existing:
+        return existing[0]
+    cur = conn.execute(
+        "INSERT INTO merge_review(kind, new_entity_id, candidate_id, entity_type, "
+        "score, reason) VALUES (?, ?, ?, ?, ?, ?)",
+        (kind, new_entity_id, candidate_id, entity_type, score, reason),
+    )
+    if auto_commit:
+        conn.commit()
+    return int(cur.lastrowid)
+
+
+def count_pending_reviews(conn: sqlite3.Connection) -> int:
+    """Number of pending review items (for the HEARTBEAT.md nudge)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM merge_review WHERE status='pending'"
+    ).fetchone()[0]
+
+
+def list_pending_reviews(conn: sqlite3.Connection, limit: int = 50) -> list[sqlite3.Row]:
+    """Pending review items, strongest signal first."""
+    return conn.execute(
+        "SELECT * FROM merge_review WHERE status='pending' "
+        "ORDER BY score DESC, created_at ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+
+def set_review_status(conn: sqlite3.Connection, review_id: int, status: str,
+                      auto_commit: bool = True) -> None:
+    conn.execute(
+        "UPDATE merge_review SET status=?, resolved_at=datetime('now') WHERE id=?",
+        (status, review_id),
+    )
+    if auto_commit:
+        conn.commit()
+
+
+def record_merge(conn: sqlite3.Connection, *, merged_from_id: str,
+                 merged_into_id: Optional[str], reason: str, score: float,
+                 from_snapshot: str, auto_commit: bool = True) -> None:
+    """Log an executed merge/purge so it can be rolled back."""
+    conn.execute(
+        "INSERT INTO merge_log(merged_from_id, merged_into_id, reason, score, "
+        "from_snapshot) VALUES (?, ?, ?, ?, ?)",
+        (merged_from_id, merged_into_id, reason, score, from_snapshot),
+    )
+    if auto_commit:
+        conn.commit()
 
 
 def search_entities_fts(

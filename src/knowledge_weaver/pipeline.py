@@ -19,10 +19,13 @@ from knowledge_weaver.db import (
     init_db,
     insert_entity,
     insert_relation,
+    insert_review,
+    record_merge,
     upsert_manifest,
 )
 from knowledge_weaver.embedder import EmbeddingClient
 from knowledge_weaver.extractor import ExtractedEntity, extract_entities_from_section
+from knowledge_weaver.resolver import load_alias_map, resolve_entity
 from knowledge_weaver.linker import (
     ExtractedEntity as LinkerEntity,
     LinkedRelation,
@@ -340,6 +343,8 @@ def _process_file(
     entity_count = 0
     texts_to_embed: list[str] = []
     entity_ids_to_embed: list[str] = []
+    # W1: registered alias -> canonical id map (mtime-cached; empty if no registry)
+    alias_map = load_alias_map()
 
     for extracted in all_extracted:
         # Build entity dict for DB
@@ -350,27 +355,61 @@ def _process_file(
             first_seen = min(db_entity["first_seen"], date_str)
             result.entities_updated += 1
         else:
-            # Cross-day name similarity merge: if a same-type entity exists
-            # with a highly similar name, merge into it instead of creating new.
-            merged_id = _find_similar_entity(
-                conn, extracted.type, extracted.name,
-                embedder=embedder, summary=extracted.summary,
+            # W1 entity resolution — vector-first three-band resolver (replaces the
+            # legacy name-first _find_similar_entity, which missed cross-language
+            # aliases like HomeBrain / 家庭大脑).
+            res = resolve_entity(
+                conn, new_id=extracted.id, entity_type=extracted.type,
+                name=extracted.name, summary=extracted.summary,
+                embedder=embedder, alias_to_canonical=alias_map,
             )
-            if merged_id:
-                logger.debug("Merging %s → %s (name similarity)", extracted.id, merged_id)
-                db_entity = get_entity(conn, merged_id)
-                # Merge source_lines from old and new to preserve full provenance
-                old_sources = json.loads(db_entity["source_lines"] or "[]") if db_entity else []  # type: ignore[union-attr]
+            if res.action in ("normalize", "merge") and res.into_id:
+                into = get_entity(conn, res.into_id)
+                orig_id = extracted.id
+                old_sources = json.loads(into["source_lines"] or "[]") if into else []
                 new_sources = json.loads(extracted.source_lines or "[]")
                 merged_sources = list(dict.fromkeys(old_sources + new_sources))
+                # Preserve the established (canonical) name; record the divergent
+                # incoming name as an alias rather than overwriting it.
+                meta = dict(extracted.metadata) if isinstance(extracted.metadata, dict) else {}
+                surviving_name = extracted.name
+                if into is not None:
+                    surviving_name = into["name"]
+                    old_meta = json.loads(into["metadata"] or "{}")
+                    aliases = list(old_meta.get("aliases", []))
+                    if extracted.name and extracted.name not in aliases \
+                            and extracted.name != surviving_name:
+                        aliases.append(extracted.name)
+                    if aliases:
+                        meta["aliases"] = aliases
+                    logger.debug("Resolved %s → %s (%s, score=%.3f)",
+                                 orig_id, res.into_id, res.reason, res.score)
+                    record_merge(
+                        conn, merged_from_id=orig_id, merged_into_id=res.into_id,
+                        reason=res.reason, score=res.score,
+                        from_snapshot=json.dumps({
+                            "id": orig_id, "name": extracted.name,
+                            "type": extracted.type, "summary": extracted.summary,
+                        }, ensure_ascii=False),
+                        auto_commit=False,
+                    )
                 extracted = ExtractedEntity(
-                    id=merged_id,
+                    id=res.into_id,
                     type=extracted.type,
-                    name=extracted.name,
+                    name=surviving_name,
                     summary=extracted.summary,
                     source_lines=json.dumps(merged_sources, ensure_ascii=False),
-                    metadata=extracted.metadata,
+                    metadata=meta,
                 )
+                db_entity = into
+            elif res.action == "review" and res.into_id:
+                # Uncertain middle band: keep BOTH entities live, queue for review.
+                insert_review(
+                    conn, kind="merge", new_entity_id=extracted.id,
+                    candidate_id=res.into_id, entity_type=extracted.type,
+                    score=res.score, reason=res.reason, auto_commit=False,
+                )
+
             if db_entity is not None:
                 new_day_count = db_entity["day_count"] + 1
                 first_seen = min(db_entity["first_seen"], date_str)

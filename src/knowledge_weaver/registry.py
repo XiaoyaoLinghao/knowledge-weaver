@@ -290,6 +290,24 @@ def load_registered_slugs(
     return registered_slugs(entries)
 
 
+def alias_to_canonical_map(entries: list[ProjectEntry]) -> dict[str, str]:
+    """Map each registered alias's entity-id -> the canonical entity-id.
+
+    Canonical entity-id = generate_entity_id("project", canonical_name).
+    Used by the W1 resolver to deterministically normalize a registered alias
+    (e.g. "家庭大脑") onto its canonical entity (e.g. proj:homebrain), whether or
+    not the canonical entity already exists in the DB.
+    """
+    mapping: dict[str, str] = {}
+    for entry in entries:
+        canonical_id = generate_entity_id("project", entry.canonical_name)
+        for alias in entry.aliases:
+            alias_id = generate_entity_id("project", alias)
+            if alias_id != canonical_id:
+                mapping[alias_id] = canonical_id
+    return mapping
+
+
 def build_project_lexicon(entries: list[ProjectEntry]) -> list[dict]:
     """Build minimal cloud-safe lexicon.
 
