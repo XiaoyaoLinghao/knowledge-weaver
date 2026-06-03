@@ -93,6 +93,8 @@ def regex_entities_for_file(path: str) -> list[ExtractedEntity]:
     out: list[ExtractedEntity] = []
     seen: set[str] = set()
     for section in parsed.sections:
+        if "结构化事实" in (section.title or ""):
+            continue  # never regex-scrape the JSON facts block
         for e in extract_entities_from_section(section, relative, dma_category=section.title):
             if e.id not in seen:
                 seen.add(e.id)

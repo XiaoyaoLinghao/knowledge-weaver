@@ -112,3 +112,16 @@ def test_pipeline_regex_mode_default(tmp_path, temp_db_path, monkeypatch):
     # regex would not produce the clean "后端用 FastAPI" decision id from JSON;
     # the point is just that consolidation runs fine ignoring the JSON block.
     conn.close()
+
+
+def test_regex_skips_facts_block(tmp_path):
+    """The regex path must ignore the ### 结构化事实 JSON block (no garbage)."""
+    from knowledge_weaver.json_facts import regex_entities_for_file
+    no_facts = FACTS_MD.split("### 结构化事实")[0]
+    f1 = tmp_path / "with.md"
+    f1.write_text(FACTS_MD, encoding="utf-8")
+    f2 = tmp_path / "without.md"
+    f2.write_text(no_facts, encoding="utf-8")
+    e1 = {e.id for e in regex_entities_for_file(str(f1))}
+    e2 = {e.id for e in regex_entities_for_file(str(f2))}
+    assert e1 == e2  # facts block contributes nothing to the regex path

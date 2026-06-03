@@ -350,6 +350,11 @@ def _process_file(
             entity_section_map[ent.id] = ""
     else:
         for section in parsed.sections:
+            # W2: never regex-scrape the structured-facts JSON block (it is for the
+            # JSON path only; scraping its JSON text would create garbage entities,
+            # e.g. once a historical file has been backfilled with a facts block).
+            if "结构化事实" in (section.title or ""):
+                continue
             # Pass the DMA category name (section.title) so extract_entities_from_item
             # can map it to the correct entity type via CATEGORY_TO_TYPE.
             # section.category holds the pre-mapped entity type; pass the raw title instead.
