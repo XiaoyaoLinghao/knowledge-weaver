@@ -320,23 +320,46 @@ def _process_file(
         result.files_processed += 1
         return
 
-    # Step 4: Extract entities from all sections
+    # Step 4: Extract entities — W2 structured handoff (default regex; opt-in JSON).
     all_extracted: list[ExtractedEntity] = []
     # Map entity_id → section_title (for linker adaptation)
     entity_section_map: dict[str, str] = {}
 
     relative_path = f"memory/{filename}"
-    for section in parsed.sections:
-        # Pass the DMA category name (section.title) so extract_entities_from_item
-        # can map it to the correct entity type via CATEGORY_TO_TYPE.
-        # section.category holds the pre-mapped entity type; pass the raw title instead.
-        section_entities = extract_entities_from_section(
-            section, relative_path, dma_category=section.title
-        )
-        for ent in section_entities:
-            if ent.id not in {e.id for e in all_extracted}:
-                all_extracted.append(ent)
-                entity_section_map[ent.id] = section.title
+
+    json_entities = None
+    if os.environ.get("KNOWLEDGE_WEAVER_EXTRACT_MODE", "regex").lower() == "json":
+        try:
+            from knowledge_weaver.json_facts import (
+                extract_json_facts_block,
+                facts_to_entities,
+            )
+            with open(filepath, "r", encoding="utf-8") as _f:
+                _facts = extract_json_facts_block(_f.read())
+            if _facts is not None:
+                json_entities = facts_to_entities(_facts, relative_path)
+        except Exception as exc:
+            logger.warning("JSON facts extraction failed for %s: %s; falling back to regex",
+                           filename, exc)
+            json_entities = None
+
+    if json_entities is not None:
+        # Structured path: facts already carry clean type/name; no section context.
+        all_extracted = json_entities
+        for ent in all_extracted:
+            entity_section_map[ent.id] = ""
+    else:
+        for section in parsed.sections:
+            # Pass the DMA category name (section.title) so extract_entities_from_item
+            # can map it to the correct entity type via CATEGORY_TO_TYPE.
+            # section.category holds the pre-mapped entity type; pass the raw title instead.
+            section_entities = extract_entities_from_section(
+                section, relative_path, dma_category=section.title
+            )
+            for ent in section_entities:
+                if ent.id not in {e.id for e in all_extracted}:
+                    all_extracted.append(ent)
+                    entity_section_map[ent.id] = section.title
 
     # Step 6 & 7: Score and upsert entities + embed (before linking,
     # because link_cross_day also inserts entities)
