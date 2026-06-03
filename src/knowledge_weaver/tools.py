@@ -140,6 +140,18 @@ def _rrf_merge(lists: list[list[dict]], k: int = _RRF_K) -> list[dict]:
     return [item_by_id[i] for i in sorted(scores, key=lambda x: scores[x], reverse=True)]
 
 
+def superseded_entity_ids(conn) -> set:
+    """Entities superseded by a newer one — the target B of an 取代 edge (A 取代 B).
+
+    W3.3: lets recall keep older facts/decisions but rank them behind current ones.
+    """
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT to_entity FROM relations WHERE rel_type='取代'").fetchall()}
+    except Exception:
+        return set()
+
+
 def knowledge_search(
     conn,
     *,
@@ -202,10 +214,14 @@ def knowledge_search(
 
     # Step 4: filter provisional projects before slicing (先滤后切,避免顶替丢失)
     reg = load_registered_slugs()
+    superseded = superseded_entity_ids(conn)
     non_provisional = [
         c for c in scored_candidates
         if not is_provisional_project(c, reg)
     ]
+    # W3.3: de-prioritize superseded entities (a newer one exists via an 取代 edge)
+    # — keep them, but rank them after current ones (stable sort preserves order).
+    non_provisional.sort(key=lambda c: 1 if c.get("id") in superseded else 0)
     candidates_slice = non_provisional[:max_results]
 
     # Step 5: build results
@@ -246,6 +262,7 @@ def knowledge_search(
             "importance": importance,
             "first_seen": entity.get("first_seen", ""),
             "last_seen": entity.get("last_seen", ""),
+            "superseded": eid in superseded,
             "related_entities": related_ids,
         })
 

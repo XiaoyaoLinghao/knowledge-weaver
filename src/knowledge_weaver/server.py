@@ -433,6 +433,22 @@ def run_consolidation_cli() -> int:
         print("WARNING: Embedding not configured. Set EMBEDDING_BASE_URL, EMBEDDING_API_KEY, and EMBEDDING_MODEL.")
         print("Running consolidation without embeddings (vector search will be unavailable).")
 
+    # W6: detect a silent embedding model/dimension change (corrupts vectors).
+    if embedder is not None:
+        try:
+            from knowledge_weaver.db import check_embedding_drift, init_db
+            _c = init_db(DB_PATH)
+            try:
+                d = check_embedding_drift(_c, model=embedder.model, dimension=embedder.dimension)
+                if d.get("drift"):
+                    print(f"  ⚠️ EMBEDDING DRIFT: {d['changed']} changed "
+                          f"({d['stored']} -> {d['current']}). Vector search may be "
+                          f"inconsistent — run scripts/re_embed.py, then the meta will update.")
+            finally:
+                _c.close()
+        except Exception as exc:
+            print(f"  embedding drift check skipped: {exc}")
+
     result = _run(DB_PATH, memory_dirs=MEMORY_DIRS, embedder=embedder)
 
     # W1/B: reconcile registry deletions (snapshot diff) on the production path.
@@ -455,6 +471,21 @@ def run_consolidation_cli() -> int:
             _conn.close()
     except Exception as exc:
         print(f"  Registry reconcile skipped: {exc}")
+
+    # W3.4 online edge typing: type any newly-created RELATES_TO edges into the
+    # knowledge-graph vocabulary (env-gated; type_relations only touches the
+    # still-generic edges, i.e. the new ones).
+    _rel_url = os.environ.get("KW_REL_API_URL")
+    if _rel_url and os.environ.get("KW_REL_API_KEY") and os.environ.get("KW_REL_MODEL"):
+        try:
+            from knowledge_weaver.typed_relations import llm_type_pairs, type_relations
+            tr = type_relations(DB_PATH, lambda c: llm_type_pairs(
+                c, api_url=_rel_url, api_key=os.environ["KW_REL_API_KEY"],
+                model=os.environ["KW_REL_MODEL"]))
+            if tr["candidates"]:
+                print(f"  Online edge typing: typed {tr['typed']}, pruned {tr['pruned']}")
+        except Exception as exc:
+            print(f"  Online edge typing skipped: {exc}")
 
     print(f"Consolidation: {result.status}")
     print(f"  Sources: {len(MEMORY_DIRS)}")

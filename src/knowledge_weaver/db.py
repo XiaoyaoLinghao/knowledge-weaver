@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS registry_snapshot (
     slug        TEXT PRIMARY KEY,
     recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- W6: provenance of the embedding model used to build entity_vectors, so a
+-- silent provider/model/dimension change (which corrupts vector search) is
+-- detected instead of failing quietly.
+CREATE TABLE IF NOT EXISTS embedding_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 VECTOR_SCHEMA = """
@@ -583,6 +591,38 @@ def snapshot_registered_slugs(conn: sqlite3.Connection, slugs: set[str],
     )
     if auto_commit:
         conn.commit()
+
+
+# --- W6: embedding-model drift detection ----------------------------------- #
+def get_embedding_meta(conn: sqlite3.Connection) -> dict:
+    return {r[0]: r[1] for r in conn.execute("SELECT key, value FROM embedding_meta").fetchall()}
+
+
+def set_embedding_meta(conn: sqlite3.Connection, *, model: str, dimension: int,
+                       provider: str = "openai-compatible", auto_commit: bool = True) -> None:
+    for k, v in (("model", str(model)), ("dimension", str(dimension)),
+                 ("provider", str(provider))):
+        conn.execute(
+            "INSERT INTO embedding_meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+    if auto_commit:
+        conn.commit()
+
+
+def check_embedding_drift(conn: sqlite3.Connection, *, model: str, dimension: int,
+                          provider: str = "openai-compatible") -> dict:
+    """Compare the current embedder identity against the recorded one.
+
+    Records current on first run (no drift). On a later model/dimension change,
+    returns drift=True so the caller can warn and trigger a re-embed (a silent
+    change otherwise corrupts vector search)."""
+    stored = get_embedding_meta(conn)
+    current = {"model": str(model), "dimension": str(dimension), "provider": str(provider)}
+    if not stored:
+        set_embedding_meta(conn, model=model, dimension=dimension, provider=provider)
+        return {"drift": False, "first_record": True, "current": current}
+    changed = [k for k in ("model", "dimension") if stored.get(k) != current[k]]
+    return {"drift": bool(changed), "changed": changed, "stored": stored, "current": current}
 
 
 def search_entities_fts(

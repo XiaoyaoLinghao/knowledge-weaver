@@ -6,8 +6,7 @@ from knowledge_weaver.db import init_db, insert_entity, insert_relation
 from knowledge_weaver.linker import generate_relation_id
 from knowledge_weaver.relations_schema import REL_TYPES, schema_prompt
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from build_typed_relations import type_relations  # noqa: E402
+from knowledge_weaver.typed_relations import type_relations  # noqa: E402
 
 
 def _ent(conn, eid, etype, name):

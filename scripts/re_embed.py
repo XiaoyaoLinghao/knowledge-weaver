@@ -113,6 +113,13 @@ def re_embed_all(db_path: str) -> None:
             texts.clear()
             ids.clear()
 
+    # W6: record the embedding identity so drift detection has a fresh baseline.
+    try:
+        from knowledge_weaver.db import set_embedding_meta
+        set_embedding_meta(conn, model=embedder.model, dimension=embedder.dimension)
+    except Exception:
+        pass
+
     conn.close()
     logger.info("Done. %d/%d entities embedded.", vec_count, total)
 
