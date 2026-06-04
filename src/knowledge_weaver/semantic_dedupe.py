@@ -54,7 +54,7 @@ def find_dedupe_actions(conn, *, high: float = RESOLVE_HIGH,
         for row in conn.execute(
             "SELECT new_entity_id, candidate_id FROM merge_review "
             "WHERE kind='merge' AND candidate_id IS NOT NULL "
-            "AND status IN ('pending','dismissed')").fetchall()
+            "AND status IN ('pending','dismissed','rejected')").fetchall()
     }
 
     merged_away: set[str] = set()
@@ -62,10 +62,19 @@ def find_dedupe_actions(conn, *, high: float = RESOLVE_HIGH,
     reviews: list[tuple[str, str, float]] = []
     seen_pairs: set[frozenset] = set()
 
+    # Cache decoded embeddings: a candidate that neighbors K survivors would
+    # otherwise be SELECT+json.loads'd K times on the cron hot path.
+    vec_cache: dict = {}
+
+    def _vec(eid):
+        if eid not in vec_cache:
+            vec_cache[eid] = get_entity_vector(conn, eid)
+        return vec_cache[eid]
+
     for r in rows:
         if r["id"] in merged_away:
             continue
-        vec = get_entity_vector(conn, r["id"])
+        vec = _vec(r["id"])
         if not vec:
             continue
         for nb in search_entity_vectors(conn, vec, limit=CANDIDATE_K + 1):
@@ -76,7 +85,7 @@ def find_dedupe_actions(conn, *, high: float = RESOLVE_HIGH,
             if pair in seen_pairs or pair in reviewed:
                 continue
             seen_pairs.add(pair)
-            cvec = get_entity_vector(conn, cid)
+            cvec = _vec(cid)
             if not cvec:
                 continue
             cos = _cosine(vec, cvec)

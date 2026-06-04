@@ -18,8 +18,10 @@ from knowledge_weaver.db import clean_entity_indexes, delete_entity
 
 # A bare version number: v0.2.0 / 0.2.2 / 2.1.140 (requires >=1 dot, all-numeric).
 _VERSION_RE = re.compile(r"^v?\d+(?:\.\d+)+$")
-# A project-internal code: P1-1 / P2-5 / WI2 / Track2 / Phase1-3 / T7.
-_TAG_RE = re.compile(r"^(?:P\d+(?:-\d+)?|WI\d+|Track\d+|Phase\d+(?:-\d+)?|T\d+)$")
+# A project-internal code: P1-1 / P2-5 / WI2 / Track2 / Phase1-3. Deliberately
+# NOT `T\d+` (collides with real models: T5, T6 transformers) and NOT bare `P\d+`
+# (could be a real part) — only the dash/prefixed forms that no real tech uses.
+_TAG_RE = re.compile(r"^(?:P\d+-\d+|WI\d+|Track\d+|Phase\d+(?:-\d+)?)$")
 
 
 def residue_kind(name: str) -> str | None:

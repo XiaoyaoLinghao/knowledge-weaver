@@ -24,6 +24,10 @@ def test_residue_kind():
     assert residue_kind("PCA9685") is None       # chip model (letters+digits, no dots)
     assert residue_kind("glm-5.1") is None        # model name (has letters)
     assert residue_kind("FastAPI") is None
+    # #2 regression: 'T\\d+' / bare 'P\\d+' removed — real models must survive
+    assert residue_kind("T5") is None             # Google T5 transformer
+    assert residue_kind("T6") is None
+    assert residue_kind("P1") is None             # bare P-code no longer auto-deleted
 
 
 def test_prune_residue_keeps_real_tech(temp_db_path):

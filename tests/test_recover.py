@@ -67,7 +67,8 @@ def test_rule_keep_tech_filters_noise():
     assert rule_keep_tech({"name": "PCA9685"})        # chip model: keep
     assert rule_keep_tech({"name": "glm-5.1"})        # version-like model name: keep
     assert rule_keep_tech({"name": "sqlite-vec"})     # real lib: keep
-    assert not rule_keep_tech({"name": "SOUL"})       # 4-char all-caps abbrev: drop
+    assert rule_keep_tech({"name": "AWS"})            # real abbrev: name rule no longer drops it
+    assert rule_keep_tech({"name": "SOUL"})           # short all-caps now deferred to signal gate
     assert not rule_keep_tech({"name": "T6"})         # ≤2 chars: drop
     assert not rule_keep_tech({"name": "config.json"})  # bare filename: drop
 
@@ -82,13 +83,19 @@ def test_signal_keep_tech_gate(tmp_path):
     insert_relation(old, {"id": generate_relation_id("proj:home", "tech:pca9685", "使用"),
                           "from_entity": "proj:home", "to_entity": "tech:pca9685",
                           "rel_type": "使用", "weight": 1.0, "evidence": "co_occurrence"})
+    # real recurring abbrev (#5): short all-caps WITH signal -> keep, not silently dropped
+    _add(old, "tech:aws", "tech", "AWS", day_count=6)
     # one-off AND isolated (day_count=1, no edge) -> drop as low-value noise
     _add(old, "tech:oneoff", "tech", "SomeOneOffLib", day_count=1)
-    # name-pattern noise -> drop regardless of signal
-    _add(old, "tech:soul", "tech", "SOUL", day_count=9)
+    # one-off short all-caps noise (day_count=1, isolated) -> drop
+    _add(old, "tech:soul", "tech", "SOUL", day_count=1)
+    # bare filename -> drop regardless of signal
+    _add(old, "tech:cfg", "tech", "config.json", day_count=8)
 
     assert signal_keep_tech(dict(get_entity(old, "tech:sqlite_vec")), old)   # recurred
     assert signal_keep_tech(dict(get_entity(old, "tech:pca9685")), old)      # connected
+    assert signal_keep_tech(dict(get_entity(old, "tech:aws")), old)          # recurring abbrev kept
     assert not signal_keep_tech(dict(get_entity(old, "tech:oneoff")), old)   # one-off isolated
-    assert not signal_keep_tech(dict(get_entity(old, "tech:soul")), old)     # name noise
+    assert not signal_keep_tech(dict(get_entity(old, "tech:soul")), old)     # one-off all-caps noise
+    assert not signal_keep_tech(dict(get_entity(old, "tech:cfg")), old)      # filename, even w/ signal
     old.close()

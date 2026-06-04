@@ -493,17 +493,20 @@ def run_consolidation_cli() -> int:
     # "auto" = also auto-merge the HIGH band.
     _dedupe_mode = (os.environ.get("KW_SEMANTIC_DEDUPE") or "").strip().lower()
     if _dedupe_mode in ("review", "auto"):
+        _dc = None
         try:
             from knowledge_weaver.db import init_db as _init
             from knowledge_weaver.semantic_dedupe import semantic_dedupe
             _dc = _init(DB_PATH)
             sd = semantic_dedupe(_dc, auto_merge=(_dedupe_mode == "auto"))
-            _dc.close()
             print(f"  Semantic dedupe ({_dedupe_mode}): merged {sd['merged']}, "
                   f"queued {sd['queued']} (high={sd['candidates_high']}, "
                   f"mid={sd['candidates_mid']})")
         except Exception as exc:
             print(f"  Semantic dedupe skipped: {exc}")
+        finally:
+            if _dc is not None:
+                _dc.close()  # always release the connection/lock before the next pass
 
     # T1: LLM tie-breaker over the merge-review queue — resolves identifier-like
     # pairs the cheap heuristics demoted to review (env-gated; needs KW_REL_* +
@@ -511,6 +514,7 @@ def run_consolidation_cli() -> int:
     if (os.environ.get("KW_TIEBREAK_REVIEWS") or "").strip() in ("1", "true", "yes"):
         _tb_url = os.environ.get("KW_REL_API_URL")
         if _tb_url and os.environ.get("KW_REL_API_KEY") and os.environ.get("KW_REL_MODEL"):
+            _tc = None
             try:
                 from knowledge_weaver.db import init_db as _init
                 from knowledge_weaver.tiebreak import llm_judge_pairs, tiebreak_reviews
@@ -518,12 +522,14 @@ def run_consolidation_cli() -> int:
                 tb = tiebreak_reviews(_tc, lambda p: llm_judge_pairs(
                     p, api_url=_tb_url, api_key=os.environ["KW_REL_API_KEY"],
                     model=os.environ["KW_REL_MODEL"]))
-                _tc.close()
                 if tb["candidates"]:
                     print(f"  Review tie-break: merged {tb['merged']}, "
                           f"dismissed {tb['dismissed']}, kept {tb['kept']}")
             except Exception as exc:
                 print(f"  Review tie-break skipped: {exc}")
+            finally:
+                if _tc is not None:
+                    _tc.close()
 
     print(f"Consolidation: {result.status}")
     print(f"  Sources: {len(MEMORY_DIRS)}")
