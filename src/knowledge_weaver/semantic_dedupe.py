@@ -29,6 +29,7 @@ from knowledge_weaver.resolver import (
     CANDIDATE_K,
     RESOLVE_HIGH,
     RESOLVE_MID,
+    _digit_variant_pair,
     _merge_unreliable,
 )
 
@@ -68,7 +69,8 @@ def find_dedupe_actions(conn, *, high: float = RESOLVE_HIGH,
             if not cvec:
                 continue
             cos = _cosine(vec, cvec)
-            unreliable = _merge_unreliable(r["name"]) or _merge_unreliable(nb["name"])
+            unreliable = (_merge_unreliable(r["name"]) or _merge_unreliable(nb["name"])
+                          or _digit_variant_pair(r["name"], nb["name"]))
             if cos >= high and not unreliable:
                 merges.append((cid, r["id"], round(cos, 4)))
                 merged_away.add(cid)

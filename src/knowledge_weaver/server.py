@@ -505,6 +505,26 @@ def run_consolidation_cli() -> int:
         except Exception as exc:
             print(f"  Semantic dedupe skipped: {exc}")
 
+    # T1: LLM tie-breaker over the merge-review queue — resolves identifier-like
+    # pairs the cheap heuristics demoted to review (env-gated; needs KW_REL_* +
+    # KW_TIEBREAK_REVIEWS=1, default off). Auto-merges 'same', dismisses 'different'.
+    if (os.environ.get("KW_TIEBREAK_REVIEWS") or "").strip() in ("1", "true", "yes"):
+        _tb_url = os.environ.get("KW_REL_API_URL")
+        if _tb_url and os.environ.get("KW_REL_API_KEY") and os.environ.get("KW_REL_MODEL"):
+            try:
+                from knowledge_weaver.db import init_db as _init
+                from knowledge_weaver.tiebreak import llm_judge_pairs, tiebreak_reviews
+                _tc = _init(DB_PATH)
+                tb = tiebreak_reviews(_tc, lambda p: llm_judge_pairs(
+                    p, api_url=_tb_url, api_key=os.environ["KW_REL_API_KEY"],
+                    model=os.environ["KW_REL_MODEL"]))
+                _tc.close()
+                if tb["candidates"]:
+                    print(f"  Review tie-break: merged {tb['merged']}, "
+                          f"dismissed {tb['dismissed']}, kept {tb['kept']}")
+            except Exception as exc:
+                print(f"  Review tie-break skipped: {exc}")
+
     print(f"Consolidation: {result.status}")
     print(f"  Sources: {len(MEMORY_DIRS)}")
     for name, path in MEMORY_DIRS:
