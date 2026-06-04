@@ -381,3 +381,14 @@ def test_real_word_vector_still_merges(temp_db_path):
                          name="家庭大脑", summary="jiating danao", embedder=emb)
     assert res.action == "merge" and res.reason == "auto:vector"
     conn.close()
+
+
+def test_digit_variant_pair():
+    from knowledge_weaver.resolver import _digit_variant_pair
+    assert _digit_variant_pair("v0.2.0", "v2.9.0")        # versions -> distinct
+    assert _digit_variant_pair("COMP7940", "COMP7240")    # course codes -> distinct
+    assert _digit_variant_pair("8080", "8081")            # ports -> distinct
+    assert _digit_variant_pair("glm-5.1", "glm-5.2")      # model versions -> distinct
+    assert not _digit_variant_pair("HomeBrain", "家庭大脑")  # real alias -> mergeable
+    assert not _digit_variant_pair("sqlite-vec", "sqlite-vec")  # identical
+    assert not _digit_variant_pair("HomeBrain", "CodeForge")    # unrelated

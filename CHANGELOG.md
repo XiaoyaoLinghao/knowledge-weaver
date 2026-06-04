@@ -2,6 +2,32 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.0 — de-ruling + cleanup (2026-06-04)
+
+Implements `KW_MEMORY_FILE_SPEC` v1.1 (unchanged).
+
+### Added
+- **T1 — de-enumerated identifier guard**: `_digit_variant_pair` (resolver) flags
+  same-template-differ-in-digits pairs (v0.2.0/v2.9.0, COMP7940/COMP7240,
+  ports) without enumerating formats — a new identifier shape needs no new regex.
+  The old `_IDENTIFIER_RE` stays only as the LLM-unavailable fallback. Used by
+  both ingest resolution and `semantic_dedupe`.
+- **T1 — LLM tie-breaker** (`tiebreak.py` + `scripts/tiebreak_reviews.py`):
+  asks "same thing or two different things?" over the merge-review queue,
+  auto-merging 'same' / dismissing 'different' / keeping genuine ambiguity.
+  Clears the review backlog; env-gated in consolidation (`KW_TIEBREAK_REVIEWS=1`).
+
+### Changed
+- **T4 — `导致` typing prompt tightened**: counterfactual test ("if A didn't
+  happen, would B?") + explicit "temporal order / investigation steps /
+  co-occurrence are NOT causation" + a negative few-shot. Reduces over-applied
+  causal edges (spot-check was 67%).
+
+### Tooling
+- **T2.1 — residue prune** (`prune_residue.py` + `scripts/prune_residue.py`):
+  one-off cleanup of bare version numbers / internal codes (P1-1, WI2, Track2)
+  the legacy regex extractor mis-typed as `tech` (signal-gate can't catch them).
+
 ## v1.0.0 — first stable release (2026-06-04)
 
 First production-validated release. Bundles the W1→W3.4 optimization program plus

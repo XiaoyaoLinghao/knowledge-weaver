@@ -71,9 +71,37 @@ def _merge_unreliable(name: str) -> bool:
     Both signals fail on structured identifiers: cosine (bge-m3 over-similarity)
     AND SequenceMatcher (COMP7940 vs COMP7240 ratio 0.875 >= NAME_HIGH, yet they
     are different course codes). Such cases are demoted to human review.
+
+    ``len <= 3`` is a generalizing guard (kept). ``_IDENTIFIER_RE`` is the
+    LLM-unavailable *fallback* for single-name identifiers; the primary,
+    enumeration-free guard for identifier *pairs* is ``_digit_variant_pair`` —
+    so a brand-new identifier format needs no new regex branch (T1).
     """
     n = (name or "").strip()
     return len(n) <= 3 or bool(_IDENTIFIER_RE.search(n))
+
+
+def _digit_variant_pair(a: str, b: str) -> bool:
+    """True if two names are identical except in their DIGIT components — i.e.
+    different instances of the same template, not duplicates.
+
+    Generalizes the ``_IDENTIFIER_RE`` enumeration: mask every digit run to ``#``
+    and compare skeletons. ``v0.2.0``/``v2.9.0`` → ``v#.#.#`` (match → distinct);
+    ``COMP7940``/``COMP7240`` → ``COMP#`` (match → distinct); ``8080``/``8081``
+    → ``#`` (match → distinct). No version/code/port format is enumerated, so a
+    new numbered-identifier shape is covered with zero new rules. Real aliases
+    (``HomeBrain``/``家庭大脑``) have differing skeletons → not flagged.
+    """
+    sa, sb = (a or "").strip(), (b or "").strip()
+    if not sa or not sb or sa == sb:
+        return False
+    if not any(c.isdigit() for c in sa + sb):
+        return False
+    ka = re.sub(r"\d+", "#", sa)
+    kb = re.sub(r"\d+", "#", sb)
+    return ka == kb and "#" in ka
+
+
 CANDIDATE_K = 10
 
 
@@ -167,7 +195,8 @@ def resolve_entity(
 
         strong_name = name_ratio >= NAME_HIGH
         strong_vec = cos >= RESOLVE_HIGH
-        unreliable = _merge_unreliable(name) or _merge_unreliable(cand_name)
+        unreliable = (_merge_unreliable(name) or _merge_unreliable(cand_name)
+                      or _digit_variant_pair(name, cand_name))
 
         if (strong_name or strong_vec) and not unreliable:
             s = max(name_ratio, cos)
