@@ -32,6 +32,7 @@ from knowledge_weaver.recover import (  # noqa: E402
     missing_entities,
     port_entities,
     rule_keep_tech,
+    signal_keep_tech,
 )
 
 
@@ -41,8 +42,12 @@ def main() -> int:
     ap.add_argument("new_db", help="current DB (a COPY; will be written to)")
     ap.add_argument("--types", default="decision",
                     help="comma list of entity types to recover (default: decision)")
+    ap.add_argument("--no-signal-gate", action="store_true",
+                    help="disable the tech signal-gate (day_count>=2 OR connected); "
+                         "fall back to the lenient name-only rule")
     ap.add_argument("--classify-tech", action="store_true",
-                    help="filter tech candidates with an LLM keep/drop (KW_FACTS_API_*)")
+                    help="LLM keep/drop to RESCUE meaningful tech that fails the signal "
+                         "gate (low-signal one-offs); needs KW_FACTS_API_*")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -56,16 +61,25 @@ def main() -> int:
         rows = missing_entities(old, new, [t])
         keep_fn = None
         if t == "tech":
+            if args.no_signal_gate:
+                # lenient: name-only rule (kept for comparison / fallback)
+                base_keep = rule_keep_tech
+            else:
+                # PRIMARY: signal-gate — recurred (day_count>=2) OR connected.
+                # One-off isolated mentions are dropped as low-value noise.
+                base_keep = lambda e: signal_keep_tech(e, old)  # noqa: E731
             if args.classify_tech:
                 url = os.environ.get("KW_FACTS_API_URL")
                 key = os.environ.get("KW_FACTS_API_KEY")
                 model = os.environ.get("KW_FACTS_MODEL")
                 if not (url and key and model):
                     print("--classify-tech needs KW_FACTS_API_URL/_KEY/_MODEL"); return 1
-                keep_ids = llm_keep_filter(rows, api_url=url, api_key=key, model=model)
-                keep_fn = lambda e: e["id"] in keep_ids  # noqa: E731
+                # rescue: LLM judges the name-valid candidates the gate dropped
+                remainder = [e for e in rows if rule_keep_tech(e) and not base_keep(e)]
+                rescued = llm_keep_filter(remainder, api_url=url, api_key=key, model=model)
+                keep_fn = lambda e: base_keep(e) or e["id"] in rescued  # noqa: E731
             else:
-                keep_fn = rule_keep_tech
+                keep_fn = base_keep
         r = port_entities(old, new, rows, keep_fn=keep_fn, dry_run=args.dry_run)
         print(f"[{t}] missing={r['candidates']} ported={r['ported']} "
               f"skipped={r['skipped']} with_vector={r['with_vector']}")

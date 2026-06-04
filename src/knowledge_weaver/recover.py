@@ -75,6 +75,34 @@ def rule_keep_tech(entity: dict) -> bool:
     return not _OBVIOUS_NOISE_RE.match(name)
 
 
+def _has_relation(conn, entity_id: str) -> bool:
+    """True if the entity is connected by ≥1 edge in the (old) DB."""
+    return conn.execute(
+        "SELECT 1 FROM relations WHERE from_entity=? OR to_entity=? LIMIT 1",
+        (entity_id, entity_id),
+    ).fetchone() is not None
+
+
+def signal_keep_tech(entity: dict, old_conn, *, min_day_count: int = 2) -> bool:
+    """Signal-gate for tech recovery (PRIMARY filter).
+
+    A tech entity is worth keeping only if it left real accumulated signal in the
+    old (incrementally-built) DB: it recurred (``day_count >= min_day_count``) OR
+    it is connected to something (≥1 relation). A one-off, isolated mention
+    (day_count=1, no edges) is dropped as low-value noise — the decision/context
+    that referenced it is what carries meaning, and that is recovered separately.
+
+    Name-pattern noise (short abbrev / bare filename) is excluded first via
+    ``rule_keep_tech``. This gate adds NO new name patterns — it reads the signal
+    already in the data, consistent with the "stop hand-rolling rules" direction.
+    """
+    if not rule_keep_tech(entity):
+        return False
+    if (entity.get("day_count") or 0) >= min_day_count:
+        return True
+    return _has_relation(old_conn, entity["id"])
+
+
 def llm_keep_filter(rows: list[dict], *, api_url: str, api_key: str, model: str,
                     chunk: int = 25, timeout: float = 90.0) -> set[str]:
     """Return the set of entity ids an LLM judges to be MEANINGFUL (keep).

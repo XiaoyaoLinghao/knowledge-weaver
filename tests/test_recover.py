@@ -5,10 +5,17 @@ from knowledge_weaver.db import (
     get_entity_vector,
     init_db,
     insert_entity,
+    insert_relation,
     upsert_entity_vector,
 )
 from knowledge_weaver.embedder import DEFAULT_DIMENSION
-from knowledge_weaver.recover import missing_entities, port_entities, rule_keep_tech
+from knowledge_weaver.linker import generate_relation_id
+from knowledge_weaver.recover import (
+    missing_entities,
+    port_entities,
+    rule_keep_tech,
+    signal_keep_tech,
+)
 
 DIM = DEFAULT_DIMENSION
 
@@ -63,3 +70,25 @@ def test_rule_keep_tech_filters_noise():
     assert not rule_keep_tech({"name": "SOUL"})       # 4-char all-caps abbrev: drop
     assert not rule_keep_tech({"name": "T6"})         # ≤2 chars: drop
     assert not rule_keep_tech({"name": "config.json"})  # bare filename: drop
+
+
+def test_signal_keep_tech_gate(tmp_path):
+    old = init_db(str(tmp_path / "old.db"))
+    # recurring tech (day_count>=2) -> keep
+    _add(old, "tech:sqlite_vec", "tech", "sqlite-vec", day_count=4)
+    # one-off but connected by an edge -> keep
+    _add(old, "tech:pca9685", "tech", "PCA9685", day_count=1)
+    _add(old, "proj:home", "project", "HomeBrain", day_count=3)
+    insert_relation(old, {"id": generate_relation_id("proj:home", "tech:pca9685", "使用"),
+                          "from_entity": "proj:home", "to_entity": "tech:pca9685",
+                          "rel_type": "使用", "weight": 1.0, "evidence": "co_occurrence"})
+    # one-off AND isolated (day_count=1, no edge) -> drop as low-value noise
+    _add(old, "tech:oneoff", "tech", "SomeOneOffLib", day_count=1)
+    # name-pattern noise -> drop regardless of signal
+    _add(old, "tech:soul", "tech", "SOUL", day_count=9)
+
+    assert signal_keep_tech(dict(get_entity(old, "tech:sqlite_vec")), old)   # recurred
+    assert signal_keep_tech(dict(get_entity(old, "tech:pca9685")), old)      # connected
+    assert not signal_keep_tech(dict(get_entity(old, "tech:oneoff")), old)   # one-off isolated
+    assert not signal_keep_tech(dict(get_entity(old, "tech:soul")), old)     # name noise
+    old.close()
