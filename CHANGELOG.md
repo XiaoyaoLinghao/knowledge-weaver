@@ -2,6 +2,16 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.5 — clean_and_rescore FK fix (2026-06-04)
+
+### Fixed
+- `scripts/clean_and_rescore.py` `_delete_entities_cascade` cleared
+  relations/vectors/fts/vec before deleting an entity but NOT `access_log` (which
+  also FK-references `entities`). Under `PRAGMA foreign_keys=ON` this made
+  `DELETE FROM entities` fail for any entity that had been accessed — the source
+  of the recurring "FK skip" that left accessed-but-noisy entities un-prunable.
+  access_log is now cleared in the cascade. +1 test.
+
 ## v1.1.4 — max code-review fixes (2026-06-04)
 
 Full-codebase MAX review (not a diff) — found bugs in older, never-reviewed core.

@@ -175,6 +175,18 @@ def _delete_entities_cascade(conn: sqlite3.Connection, entity_ids: list[str]) ->
     except Exception:
         pass
 
+    # access_log also FK-references entities(id) (schema). With PRAGMA
+    # foreign_keys=ON, NOT clearing it makes `DELETE FROM entities` fail for any
+    # entity that has been accessed — the cause of the "FK skip" that left
+    # accessed-but-noisy entities un-prunable. Clear it before the entity delete.
+    try:
+        conn.execute(
+            f"DELETE FROM access_log WHERE entity_id IN ({placeholders})",
+            entity_ids,
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Delete entities
     conn.execute(
         f"DELETE FROM entities WHERE id IN ({placeholders})",
