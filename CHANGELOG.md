@@ -2,6 +2,14 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.1 — tie-break count fix (2026-06-04)
+
+### Fixed
+- `tiebreak.apply_tiebreak`: a no-op merge (target already removed by a prune or
+  an earlier merge in the same batch) is now counted as `dismissed` — matching
+  the review status it sets — instead of being reported as a phantom `merged`.
+  Cosmetic count only; data was always correct.
+
 ## v1.1.0 — de-ruling + cleanup (2026-06-04)
 
 Implements `KW_MEMORY_FILE_SPEC` v1.1 (unchanged).
