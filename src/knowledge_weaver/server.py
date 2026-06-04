@@ -487,6 +487,24 @@ def run_consolidation_cli() -> int:
         except Exception as exc:
             print(f"  Online edge typing skipped: {exc}")
 
+    # Second-pass semantic dedup: catch same-concept-different-name entities that
+    # ingest-time resolution never compared (env-gated; default off). "review" =
+    # queue every candidate for human approval (safe for unattended cron);
+    # "auto" = also auto-merge the HIGH band.
+    _dedupe_mode = (os.environ.get("KW_SEMANTIC_DEDUPE") or "").strip().lower()
+    if _dedupe_mode in ("review", "auto"):
+        try:
+            from knowledge_weaver.db import init_db as _init
+            from knowledge_weaver.semantic_dedupe import semantic_dedupe
+            _dc = _init(DB_PATH)
+            sd = semantic_dedupe(_dc, auto_merge=(_dedupe_mode == "auto"))
+            _dc.close()
+            print(f"  Semantic dedupe ({_dedupe_mode}): merged {sd['merged']}, "
+                  f"queued {sd['queued']} (high={sd['candidates_high']}, "
+                  f"mid={sd['candidates_mid']})")
+        except Exception as exc:
+            print(f"  Semantic dedupe skipped: {exc}")
+
     print(f"Consolidation: {result.status}")
     print(f"  Sources: {len(MEMORY_DIRS)}")
     for name, path in MEMORY_DIRS:
