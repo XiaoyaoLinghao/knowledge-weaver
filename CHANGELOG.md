@@ -2,6 +2,30 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.4 — max code-review fixes (2026-06-04)
+
+Full-codebase MAX review (not a diff) — found bugs in older, never-reviewed core.
+
+### Fixed
+- **K1** vector search lost distance ordering: `_search_entity_vectors_vec`'s
+  `IN (...)` re-fetch returned arbitrary order (only with sqlite-vec, i.e. prod),
+  mis-ranking RRF. Results are now re-ordered nearest-first.
+- **K2** JSON-facts with an emoji/punctuation-only name slugified to empty → all
+  collapsed into one `fact:` entity. Such names are now dropped (like the regex path).
+- **K3** merge repointed edges with `INSERT OR REPLACE`, clobbering an edge dst
+  already had. Now `INSERT OR IGNORE` keeps dst's weight/evidence.
+- **K4** `rollback_merge` didn't reverse dst's accumulators (day_count/source_lines/
+  first_seen/importance) and left orphaned reviews 'stale'. The snapshot now stores
+  dst's pre-state; rollback restores it and un-stales the reviews.
+- **K5** `knowledge_search` ranked/filtered by score re-derived with access_count=0,
+  disagreeing with the stored+displayed importance. Now uses stored importance.
+- **K6** `knowledge_trace` labelled every depth≥2 edge `RELATES_TO`; now reports
+  each entity's real relation type.
+- **K7** project→sub-entity dependency used substring match ('Home' ⊂ 'HomeBrain');
+  now word-boundary (`_name_mentioned`), still matching CJK.
+- **K8** `parse_indexed_verdicts` rejected a chunk on any extra key; now tolerates
+  harmless extras (keys ⊇ {1..N}), still rejects missing/shifted.
+
 ## v1.1.3 — code-review fixes (2026-06-04)
 
 Ten findings from a high-effort code review of the v1.0–v1.2 work.

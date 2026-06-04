@@ -65,6 +65,11 @@ def facts_to_entities(facts: Optional[list[dict]], relative_path: str) -> list[E
         if etype not in VALID_TYPES or not name:
             continue
         eid = generate_entity_id(etype, name)
+        # K2: a name that slugifies to empty (emoji / punctuation-only) yields just
+        # the type prefix ("fact:"), so all such facts would UPSERT-collapse into one
+        # garbage entity. Drop them (the regex path already does via _is_garbage_name).
+        if eid.endswith(":"):
+            continue
         if eid in seen:
             continue
         seen.add(eid)
