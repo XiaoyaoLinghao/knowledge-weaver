@@ -78,3 +78,22 @@ def test_noop_merge_counts_as_dismissed(temp_db_path):
     res = apply_tiebreak(conn, {r1: "same", r2: "same"}, pairs)
     assert res["merged"] == 1 and res["dismissed"] == 1     # not merged==2
     conn.close()
+
+
+def test_merge_marks_orphan_pending_stale(temp_db_path):
+    """#8: merging an entity away marks any OTHER pending review referencing it as
+    'stale' so count_pending_reviews isn't permanently inflated by dangling rows."""
+    from knowledge_weaver.db import (
+        count_pending_reviews, init_db, insert_review, merge_existing_entities,
+    )
+    conn = init_db(temp_db_path)
+    for eid in ["tech:a_node", "tech:b_node", "tech:c_node"]:
+        insert_entity(conn, {"id": eid, "type": "tech", "name": eid, "summary": eid,
+                             "importance": 0.5, "first_seen": "2026-01-01",
+                             "last_seen": "2026-01-01"})
+    insert_review(conn, kind="merge", new_entity_id="tech:a_node",
+                  candidate_id="tech:c_node", entity_type="tech", score=0.8, reason="t")
+    assert count_pending_reviews(conn) == 1
+    merge_existing_entities(conn, from_id="tech:a_node", into_id="tech:b_node")
+    assert count_pending_reviews(conn) == 0          # orphan review marked stale
+    conn.close()

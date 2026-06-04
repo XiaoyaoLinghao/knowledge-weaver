@@ -8,8 +8,6 @@ type new edges. The LLM call (``llm_type_pairs``) is isolated so the DB surgery
 """
 from __future__ import annotations
 
-import json
-import re
 from collections import Counter
 
 from knowledge_weaver.db import get_entity, init_db, insert_relation
@@ -131,37 +129,14 @@ def reset_llm_typed_edges(conn, auto_commit: bool = True) -> int:
 
 def llm_type_pairs(cands: list[dict], *, api_url: str, api_key: str, model: str,
                    chunk: int = 20, timeout: float = 90.0) -> dict:
-    """Type candidate edges via an OpenAI-compatible chat model (chunked)."""
-    import httpx
+    """Type candidate edges via an OpenAI-compatible chat model (chunked).
 
-    url = api_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    sys_prompt = build_typing_system_prompt()
-    out: dict = {}
-    for i in range(0, len(cands), chunk):
-        batch = cands[i:i + chunk]
-        lines = [f'[{j + 1}] A({c["from"]})  →  B({c["to"]})' for j, c in enumerate(batch)]
-        try:
-            resp = httpx.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}",
-                         "Content-Type": "application/json"},
-                json={"model": model, "temperature": 0.1, "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": "实体对：\n" + "\n".join(lines)},
-                ]},
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
-            mapping = json.loads(content)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ! chunk {i // chunk + 1} failed: {exc}; leaving as RELATES_TO")
-            continue
-        for j, c in enumerate(batch):
-            t = mapping.get(str(j + 1)) or mapping.get(j + 1)
-            if isinstance(t, str):
-                out[c["rel_id"]] = t.strip()
-    return out
+    Returns {rel_id: type_string}. A failed/invalid chunk is left out (the edges
+    stay RELATES_TO) — see knowledge_weaver._llm.classify_items.
+    """
+    from knowledge_weaver._llm import classify_items
+    return classify_items(
+        cands, key=lambda c: c["rel_id"],
+        render=lambda c: f'A({c["from"]})  →  B({c["to"]})',
+        system_prompt=build_typing_system_prompt(), user_prefix="实体对：\n",
+        api_url=api_url, api_key=api_key, model=model, chunk=chunk, timeout=timeout)

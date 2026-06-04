@@ -14,8 +14,6 @@ deterministically testable with a mock.
 """
 from __future__ import annotations
 
-import json
-import re
 
 from knowledge_weaver.db import (
     get_entity,
@@ -83,50 +81,26 @@ def tiebreak_reviews(conn, judge_fn, *, dry_run: bool = False) -> dict:
     return apply_tiebreak(conn, decisions, pairs, dry_run=dry_run)
 
 
+_JUDGE_PROMPT = (
+    "你在判断知识库里两个实体是不是同一个东西。给你若干对实体(A / B,各含类型+名称+摘要)。"
+    "对每一对,判断 A 与 B 是【同一事物的不同写法】回 same,还是【两个不同的事物】回 different。\n"
+    "要点:① 版本号(v0.2.0 vs v2.9.0)、编号(COMP7940 vs COMP7240)、不同端口/批次/序号"
+    "= different(同模板的不同实例,不是重复);② 跨语言或缩写别名(HomeBrain vs 家庭大脑、"
+    "KW vs Knowledge Weaver)= same;③ 拿不准偏 different(不乱合并)。\n"
+    '只输出一个 JSON 对象,形如 {"1":"same","2":"different",...},不要任何其它文字。'
+)
+
+
 def llm_judge_pairs(pairs: list[dict], *, api_url: str, api_key: str, model: str,
                     chunk: int = 20, timeout: float = 90.0) -> dict:
     """Ask an OpenAI-compatible model 'same or different?' per pair (chunked).
 
-    Returns ``{review_id: 'same'|'different'}`` (omits anything unparseable —
-    those stay pending). Isolated for mockability.
+    Returns ``{review_id: 'same'|'different'}``; a failed or index-mismatched
+    chunk is left out (those reviews stay pending). See _llm.classify_items.
     """
-    import httpx
-
-    url = api_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    sys_prompt = (
-        "你在判断知识库里两个实体是不是同一个东西。给你若干对实体(A / B,各含类型+名称+摘要)。"
-        "对每一对,判断 A 与 B 是【同一事物的不同写法】回 same,还是【两个不同的事物】回 different。\n"
-        "要点:① 版本号(v0.2.0 vs v2.9.0)、编号(COMP7940 vs COMP7240)、不同端口/批次/序号"
-        "= different(同模板的不同实例,不是重复);② 跨语言或缩写别名(HomeBrain vs 家庭大脑、"
-        "KW vs Knowledge Weaver)= same;③ 拿不准偏 different(不乱合并)。\n"
-        '只输出一个 JSON 对象,形如 {"1":"same","2":"different",...},不要任何其它文字。'
-    )
-    out: dict = {}
-    for i in range(0, len(pairs), chunk):
-        batch = pairs[i:i + chunk]
-        lines = [f'[{j + 1}] A({c["a"]})  ||  B({c["b"]})' for j, c in enumerate(batch)]
-        try:
-            resp = httpx.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}",
-                         "Content-Type": "application/json"},
-                json={"model": model, "temperature": 0.1, "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": "实体对:\n" + "\n".join(lines)},
-                ]},
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
-            mapping = json.loads(content)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ! tiebreak chunk {i // chunk + 1} failed: {exc}; leaving pending")
-            continue
-        for j, c in enumerate(batch):
-            v = mapping.get(str(j + 1)) or mapping.get(j + 1)
-            if isinstance(v, str):
-                out[c["review_id"]] = v.strip()
-    return out
+    from knowledge_weaver._llm import classify_items
+    return classify_items(
+        pairs, key=lambda c: c["review_id"],
+        render=lambda c: f'A({c["a"]})  ||  B({c["b"]})',
+        system_prompt=_JUDGE_PROMPT, user_prefix="实体对:\n",
+        api_url=api_url, api_key=api_key, model=model, chunk=chunk, timeout=timeout)

@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS merge_review (
     entity_type  TEXT,
     score        REAL,
     reason       TEXT,
-    status       TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'merged' | 'rejected' | 'purged' | 'kept'
+    status       TEXT NOT NULL DEFAULT 'pending', -- pending | merged | rejected | purged | kept | dismissed(LLM tie-break) | stale(orphaned by a merge)
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at  TEXT
 );
@@ -429,15 +429,19 @@ def insert_review(conn: sqlite3.Connection, *, kind: str, new_entity_id: str,
                   reason: str, auto_commit: bool = True) -> int:
     """Queue a merge/purge candidate for human review (idempotent per pair).
 
-    Idempotent against pending AND dismissed: a dismissed pair means "already
-    judged not-the-same", so it is never re-queued — otherwise the self-maintenance
-    loop would re-surface and re-judge (LLM cost) the same distinct pairs every
-    consolidation cycle. (merged pairs can't recur — the entity is gone.)
+    Idempotent against every *decided-distinct* status — pending (in queue),
+    dismissed (LLM tie-breaker) AND rejected (human via kw_resolve) — and
+    direction-agnostic (a→b == b→a). Without this the self-maintenance loop would
+    re-surface and re-judge (LLM cost) the same distinct pair every consolidation
+    cycle. ``merged``/``purged`` are deliberately NOT skipped: a merge rolled back
+    via merge_log should be re-evaluable.
     """
     existing = conn.execute(
-        "SELECT id FROM merge_review WHERE status IN ('pending','dismissed') AND kind=? "
-        "AND new_entity_id=? AND IFNULL(candidate_id,'')=IFNULL(?,'')",
-        (kind, new_entity_id, candidate_id),
+        "SELECT id FROM merge_review WHERE status IN ('pending','dismissed','rejected') "
+        "AND kind=? AND ("
+        "(new_entity_id=? AND IFNULL(candidate_id,'')=IFNULL(?,'')) OR "
+        "(new_entity_id=? AND IFNULL(candidate_id,'')=IFNULL(?,'')))",
+        (kind, new_entity_id, candidate_id, candidate_id, new_entity_id),
     ).fetchone()
     if existing:
         return existing[0]
@@ -571,6 +575,14 @@ def merge_existing_entities(conn: sqlite3.Connection, from_id: str, into_id: str
 
     delete_entity(conn, from_id, auto_commit=False)  # also drops from_id's relations
     clean_entity_indexes(conn, from_id)
+    # Any OTHER pending review referencing the now-deleted entity is dangling —
+    # mark it 'stale' so it stops being counted/re-surfaced (the review that drove
+    # this merge, if any, is set to 'merged' by its caller afterward).
+    conn.execute(
+        "UPDATE merge_review SET status='stale', resolved_at=datetime('now') "
+        "WHERE status='pending' AND (new_entity_id=? OR candidate_id=?)",
+        (from_id, from_id),
+    )
     record_merge(conn, merged_from_id=from_id, merged_into_id=into_id,
                  reason=reason, score=score, from_snapshot=snapshot, auto_commit=False)
     if auto_commit:

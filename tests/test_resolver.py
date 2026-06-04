@@ -411,3 +411,29 @@ def test_insert_review_not_requeued_after_dismiss(temp_db_path):
     assert rid2 == rid                        # returns the dismissed row
     assert count_pending_reviews(conn) == 0   # NOT re-queued
     conn.close()
+
+
+def test_digit_variant_letter_suffix():
+    from knowledge_weaver.resolver import _digit_variant_pair
+    assert _digit_variant_pair("GPT-4", "GPT-4o")      # #3: letter-suffixed -> distinct
+    assert _digit_variant_pair("ESP32", "ESP32S")       # 1-char tail add -> distinct
+    assert not _digit_variant_pair("HomeBrain", "家庭大脑")   # real alias unaffected
+    assert not _digit_variant_pair("FastAPI", "Flask")        # unrelated, no digits
+    assert not _digit_variant_pair("v1", "v1beta")            # 4-char tail: too different to flag
+
+
+def test_insert_review_not_requeued_after_human_reject(temp_db_path):
+    from knowledge_weaver.db import (
+        count_pending_reviews, init_db, insert_review, set_review_status,
+    )
+    conn = init_db(temp_db_path)
+    rid = insert_review(conn, kind="merge", new_entity_id="ent:a",
+                        candidate_id="ent:b", entity_type="tech", score=0.9, reason="t")
+    set_review_status(conn, rid, "rejected")              # human kw_resolve reject
+    # same pair, AND the reversed direction, must both be recognized as decided
+    assert insert_review(conn, kind="merge", new_entity_id="ent:a",
+                         candidate_id="ent:b", entity_type="tech", score=0.9, reason="t") == rid
+    assert insert_review(conn, kind="merge", new_entity_id="ent:b",
+                         candidate_id="ent:a", entity_type="tech", score=0.9, reason="t") == rid
+    assert count_pending_reviews(conn) == 0               # not re-queued
+    conn.close()

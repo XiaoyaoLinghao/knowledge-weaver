@@ -88,18 +88,28 @@ def _digit_variant_pair(a: str, b: str) -> bool:
     Generalizes the ``_IDENTIFIER_RE`` enumeration: mask every digit run to ``#``
     and compare skeletons. ``v0.2.0``/``v2.9.0`` → ``v#.#.#`` (match → distinct);
     ``COMP7940``/``COMP7240`` → ``COMP#`` (match → distinct); ``8080``/``8081``
-    → ``#`` (match → distinct). No version/code/port format is enumerated, so a
-    new numbered-identifier shape is covered with zero new rules. Real aliases
-    (``HomeBrain``/``家庭大脑``) have differing skeletons → not flagged.
+    → ``#`` (match → distinct). Also catches a short alphanumeric TAIL difference
+    around the digits — ``GPT-4``/``GPT-4o`` (digit-stripped ``GPT-`` vs ``GPT-o``,
+    differ by ≤2 trailing chars) → distinct. No format is enumerated, so a new
+    numbered-identifier shape is covered with zero new rules. Real aliases
+    (``HomeBrain``/``家庭大脑``) have differing skeletons → not flagged. Borderline
+    cases only demote to review — the LLM tie-breaker makes the final call.
     """
     sa, sb = (a or "").strip(), (b or "").strip()
     if not sa or not sb or sa == sb:
         return False
     if not any(c.isdigit() for c in sa + sb):
         return False
-    ka = re.sub(r"\d+", "#", sa)
-    kb = re.sub(r"\d+", "#", sb)
-    return ka == kb and "#" in ka
+    if re.sub(r"\d+", "#", sa) == re.sub(r"\d+", "#", sb):
+        return True  # same template, differ only in digit runs
+    # letter-suffixed variant: strip digits entirely; if the remainders differ only
+    # by a short trailing add (GPT-4 vs GPT-4o), they are distinct instances.
+    da, db = re.sub(r"\d+", "", sa), re.sub(r"\d+", "", sb)
+    if da and db and da != db:
+        lo, hi = sorted((da, db), key=len)
+        if hi.startswith(lo) and len(hi) - len(lo) <= 2:
+            return True
+    return False
 
 
 CANDIDATE_K = 10

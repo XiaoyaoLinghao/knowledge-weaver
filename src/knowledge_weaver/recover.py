@@ -15,7 +15,6 @@ existing new entities) then build_typed_relations + rebuild_fts.
 """
 from __future__ import annotations
 
-import json
 import re
 
 from knowledge_weaver.db import get_entity_vector, insert_entity, upsert_entity_vector
@@ -60,19 +59,25 @@ def port_entities(old_conn, new_conn, rows: list[dict], *, keep_fn=None,
             "skipped": skipped, "with_vector": with_vector}
 
 
-# A coarse rule for obvious tech noise (≤4-char all-caps abbrevs, bare filenames).
-# Deliberately conservative: when unsure, KEEP and let semantic_dedupe / review
-# sort it out. For real precision on tech, prefer the LLM keep filter below.
-# Alphabetic extension (.json/.py) = filename noise; numeric (.1, glm-5.1) = a
-# version and KEPT. That distinction is why the extension must be [A-Za-z].
-_OBVIOUS_NOISE_RE = re.compile(r"^[A-Z]{1,4}$|^[\w-]+\.[A-Za-z]{1,5}$")
+# Bare filename (alphabetic extension .json/.py) = always noise; a numeric
+# extension (.1, glm-5.1) is a version and KEPT — hence the extension is [A-Za-z].
+_FILENAME_RE = re.compile(r"^[\w-]+\.[A-Za-z]{1,5}$")
+# Short all-caps (RTDL/SOUL/NEON noise, but also real abbrevs AWS/GPT/SQL) —
+# can't be told apart by name, so do NOT hard-drop: let the signal gate decide.
+_SHORT_ALLCAPS_RE = re.compile(r"^[A-Z]{1,4}$")
 
 
 def rule_keep_tech(entity: dict) -> bool:
+    """Cheap name-only noise check: drop ≤2-char names and bare filenames.
+
+    Short all-caps is NOT dropped here (a real ``AWS``/``GPT`` is indistinguishable
+    by name from noise ``SOUL``) — ``signal_keep_tech`` only keeps those with
+    accumulated signal, so the name rule no longer silently discards real abbrevs.
+    """
     name = (entity.get("name") or "").strip()
     if len(name) <= 2:
         return False
-    return not _OBVIOUS_NOISE_RE.match(name)
+    return not _FILENAME_RE.match(name)
 
 
 def _has_relation(conn, entity_id: str) -> bool:
@@ -92,9 +97,9 @@ def signal_keep_tech(entity: dict, old_conn, *, min_day_count: int = 2) -> bool:
     (day_count=1, no edges) is dropped as low-value noise — the decision/context
     that referenced it is what carries meaning, and that is recovered separately.
 
-    Name-pattern noise (short abbrev / bare filename) is excluded first via
-    ``rule_keep_tech``. This gate adds NO new name patterns — it reads the signal
-    already in the data, consistent with the "stop hand-rolling rules" direction.
+    Filenames / ≤2-char names are excluded first via ``rule_keep_tech``. Short
+    all-caps abbrevs (AWS vs SOUL) flow through the same signal test, so a real
+    recurring abbrev survives while one-off noise does not.
     """
     if not rule_keep_tech(entity):
         return False
@@ -103,50 +108,28 @@ def signal_keep_tech(entity: dict, old_conn, *, min_day_count: int = 2) -> bool:
     return _has_relation(old_conn, entity["id"])
 
 
+_KEEP_PROMPT = (
+    "你在清洗一个技术知识库。给你若干候选技术实体（name + 摘要）。"
+    "判断每一个是否是【有意义的具体技术实体】（如芯片型号 PCA9685、模型名 glm-5.1、"
+    "commit hash、具体库/框架/协议名），还是【噪声】（无意义短缩写、泛化词、裸文件名、"
+    "拼写碎片）。只对有意义的回 keep，噪声回 drop。"
+    '只输出一个 JSON 对象 {"1":"keep","2":"drop",...}，不要任何其它文字。'
+)
+
+
 def llm_keep_filter(rows: list[dict], *, api_url: str, api_key: str, model: str,
                     chunk: int = 25, timeout: float = 90.0) -> set[str]:
-    """Return the set of entity ids an LLM judges to be MEANINGFUL (keep).
+    """Entity ids an LLM judges MEANINGFUL (verdict 'keep').
 
-    Isolated for mockability; the DB porting stays deterministic.
+    A failed / index-mismatched chunk is DROPPED (its items left out of the keep
+    set), not kept — for a noise filter the safe default is drop, so an API blip
+    never re-admits a batch of noise. Re-run when the model is healthy to recover
+    any dropped real ones.
     """
-    import httpx
-
-    url = api_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url += "/chat/completions"
-    sys_prompt = (
-        "你在清洗一个技术知识库。给你若干候选技术实体（name + 摘要）。"
-        "判断每一个是否是【有意义的具体技术实体】（如芯片型号 PCA9685、模型名 glm-5.1、"
-        "commit hash、具体库/框架/协议名），还是【噪声】（无意义短缩写、泛化词、裸文件名、"
-        "拼写碎片）。只对有意义的回 keep，噪声回 drop。"
-        '只输出一个 JSON 对象 {"1":"keep","2":"drop",...}，不要任何其它文字。'
-    )
-    keep: set[str] = set()
-    for i in range(0, len(rows), chunk):
-        batch = rows[i:i + chunk]
-        lines = [f'[{j+1}] {e.get("name")} — {(e.get("summary") or "")[:80]}'
-                 for j, e in enumerate(batch)]
-        try:
-            resp = httpx.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}",
-                         "Content-Type": "application/json"},
-                json={"model": model, "temperature": 0.1, "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": "候选：\n" + "\n".join(lines)},
-                ]},
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"].strip()
-            content = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
-            mapping = json.loads(content)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ! keep-filter chunk {i // chunk + 1} failed: {exc}; keeping all in chunk")
-            keep.update(e["id"] for e in batch)
-            continue
-        for j, e in enumerate(batch):
-            v = mapping.get(str(j + 1)) or mapping.get(j + 1)
-            if isinstance(v, str) and v.strip().lower() == "keep":
-                keep.add(e["id"])
-    return keep
+    from knowledge_weaver._llm import classify_items
+    verdicts = classify_items(
+        rows, key=lambda e: e["id"],
+        render=lambda e: f'{e.get("name")} — {(e.get("summary") or "")[:80]}',
+        system_prompt=_KEEP_PROMPT, user_prefix="候选：\n",
+        api_url=api_url, api_key=api_key, model=model, chunk=chunk, timeout=timeout)
+    return {eid for eid, v in verdicts.items() if v.lower() == "keep"}

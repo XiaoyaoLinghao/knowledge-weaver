@@ -2,6 +2,39 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.3 — code-review fixes (2026-06-04)
+
+Ten findings from a high-effort code review of the v1.0–v1.2 work.
+
+### Fixed (correctness)
+- **Cost-leak hole**: the v1.1.2 idempotency guard skipped only `dismissed` (LLM),
+  not `rejected` (human via kw_resolve), so human-rejected pairs were re-queued and
+  re-judged every cycle. insert_review + semantic_dedupe now skip
+  `pending|dismissed|rejected`, and insert_review is direction-agnostic (a→b == b→a).
+- **Irreversible over-delete**: prune_residue `_TAG_RE` matched real models (T5/T6
+  via `T\d+`) and bare `P\d+`; both removed — only dash/prefixed internal codes
+  (P1-1/WI2/Track2/Phase1-3) are deleted now.
+- **Wrong auto-merge (letter suffix)**: `_digit_variant_pair` now also flags a short
+  (≤2 char) alphanumeric tail difference, so GPT-4/GPT-4o are demoted to review
+  instead of auto-merged.
+- **Wrong auto-merge (index drift)**: LLM verdicts are accepted only when the returned
+  JSON keys are exactly `1..N` (parse_indexed_verdicts), preventing a shifted/extra
+  index from assigning a verdict to the wrong pair.
+- **Recovery dropped real abbrevs**: short all-caps (AWS/GPT/SQL) are no longer
+  hard-dropped by name; they pass the signal gate (kept iff recurring/connected).
+- **Noise filter unsafe default**: llm_keep_filter now DROPS a failed/invalid chunk
+  (was keep-all), so an API blip can't re-admit a batch of noise.
+- **Connection leak/lock**: the consolidation semantic-dedupe / tie-break blocks now
+  close their DB connection in `finally`.
+- **Orphan reviews**: merging an entity away marks other pending reviews referencing
+  it `stale`, so the pending count isn't permanently inflated.
+
+### Changed (internal)
+- Extracted `knowledge_weaver._llm.classify_items` — one chunked chat caller shared by
+  llm_type_pairs / llm_judge_pairs / llm_keep_filter (was ~90 duplicated lines).
+- semantic_dedupe caches decoded embeddings per run (no repeated json.loads on the
+  cron hot path).
+
 ## v1.1.2 — stop re-judging dismissed pairs (2026-06-04)
 
 ### Fixed
