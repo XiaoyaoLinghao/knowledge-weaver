@@ -51,13 +51,19 @@ def apply_tiebreak(conn, decisions: dict, pairs: list[dict], *,
     for p in pairs:
         d = (decisions.get(p["review_id"]) or "").strip().lower()
         if d == "same":
+            ok = True
             if not dry_run:
                 ok = merge_existing_entities(conn, from_id=p["from_id"],
                                              into_id=p["into_id"],
                                              reason="llm-tiebreak", auto_commit=False)
                 set_review_status(conn, p["review_id"],
                                   "merged" if ok else "dismissed", auto_commit=False)
-            merged += 1
+            # a no-op merge (target already removed by a prune / earlier merge) is
+            # recorded as dismissed, so count it there — not as a phantom merge.
+            if ok:
+                merged += 1
+            else:
+                dismissed += 1
         elif d == "different":
             if not dry_run:
                 set_review_status(conn, p["review_id"], "dismissed", auto_commit=False)
