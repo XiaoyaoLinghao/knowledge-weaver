@@ -85,3 +85,31 @@ def test_k6_trace_depth2_real_rel_type(temp_db_path):
     by_id = {r["entity_id"]: r for r in res["related"]}
     assert by_id["risk:c"]["rel_type"] == "导致"   # K6: not the RELATES_TO fallback
     conn.close()
+
+
+def test_clean_and_rescore_prunes_accessed_entity(temp_db_path):
+    """FK fix: an entity with an access_log row (FK-referencing entities) must be
+    deletable by clean_and_rescore's cascade under PRAGMA foreign_keys=ON."""
+    import importlib.util
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "car_mod", root / "scripts" / "clean_and_rescore.py")
+    car = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(car)
+
+    conn = init_db(temp_db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
+    _e(conn, "tech:a")
+    _e(conn, "tech:b")
+    from knowledge_weaver.linker import generate_relation_id
+    insert_relation(conn, {"id": generate_relation_id("tech:a", "tech:b", "使用"),
+                           "from_entity": "tech:a", "to_entity": "tech:b", "rel_type": "使用",
+                           "weight": 1.0, "evidence": "x"})
+    conn.execute("INSERT INTO access_log(entity_id, tool, query) VALUES('tech:a','search','q')")
+    conn.commit()
+    # pre-fix: raised sqlite3.IntegrityError (FK); now deletes cleanly
+    car._delete_entities_cascade(conn, ["tech:a"])
+    assert get_entity(conn, "tech:a") is None
+    assert conn.execute("SELECT COUNT(*) FROM access_log WHERE entity_id='tech:a'").fetchone()[0] == 0
+    conn.close()
