@@ -392,3 +392,22 @@ def test_digit_variant_pair():
     assert not _digit_variant_pair("HomeBrain", "家庭大脑")  # real alias -> mergeable
     assert not _digit_variant_pair("sqlite-vec", "sqlite-vec")  # identical
     assert not _digit_variant_pair("HomeBrain", "CodeForge")    # unrelated
+
+
+def test_insert_review_not_requeued_after_dismiss(temp_db_path):
+    from knowledge_weaver.db import (
+        count_pending_reviews,
+        init_db,
+        insert_review,
+        set_review_status,
+    )
+    conn = init_db(temp_db_path)
+    rid = insert_review(conn, kind="merge", new_entity_id="ent:a",
+                        candidate_id="ent:b", entity_type="tech", score=0.9, reason="t")
+    assert count_pending_reviews(conn) == 1
+    set_review_status(conn, rid, "dismissed")
+    rid2 = insert_review(conn, kind="merge", new_entity_id="ent:a",
+                         candidate_id="ent:b", entity_type="tech", score=0.9, reason="t")
+    assert rid2 == rid                        # returns the dismissed row
+    assert count_pending_reviews(conn) == 0   # NOT re-queued
+    conn.close()

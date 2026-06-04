@@ -75,3 +75,18 @@ def test_semantic_dedupe_review_only(temp_db_path):
     assert get_entity(conn, "dec:dup") is not None            # still present, awaiting review
     assert count_pending_reviews(conn) == 1
     conn.close()
+
+
+def test_skips_already_reviewed_pairs(temp_db_path):
+    """A pair with an existing (pending/dismissed) review is not re-surfaced —
+    stops the cron loop from re-queuing + re-judging the same distinct pairs."""
+    from knowledge_weaver.db import insert_review, set_review_status
+    conn = init_db(temp_db_path)
+    _add(conn, "dec:main", "decision", "采用本地规则引擎做聚合", _vec(1.0), day_count=5)
+    _add(conn, "dec:dup", "decision", "采用本地规则引擎做聚合不依赖LLM", _vec(0.95))
+    rid = insert_review(conn, kind="merge", new_entity_id="dec:dup",
+                        candidate_id="dec:main", entity_type="decision", score=0.95, reason="t")
+    set_review_status(conn, rid, "dismissed")
+    r = semantic_dedupe(conn)
+    assert r["candidates_high"] == 0 and r["merged"] == 0   # reviewed pair skipped
+    conn.close()

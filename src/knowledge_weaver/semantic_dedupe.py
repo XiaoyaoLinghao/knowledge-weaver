@@ -46,6 +46,17 @@ def find_dedupe_actions(conn, *, high: float = RESOLVE_HIGH,
         "SELECT id, type, name, day_count, importance FROM entities").fetchall()]
     rows.sort(key=lambda r: (r["day_count"] or 0, r["importance"] or 0.0), reverse=True)
 
+    # Pairs already reviewed (pending OR dismissed) — don't re-surface them every
+    # cycle. Without this the cron loop re-queues and re-judges (LLM cost) the same
+    # distinct pairs forever.
+    reviewed: set[frozenset] = {
+        frozenset((row[0], row[1]))
+        for row in conn.execute(
+            "SELECT new_entity_id, candidate_id FROM merge_review "
+            "WHERE kind='merge' AND candidate_id IS NOT NULL "
+            "AND status IN ('pending','dismissed')").fetchall()
+    }
+
     merged_away: set[str] = set()
     merges: list[tuple[str, str, float]] = []
     reviews: list[tuple[str, str, float]] = []
@@ -62,7 +73,7 @@ def find_dedupe_actions(conn, *, high: float = RESOLVE_HIGH,
             if cid == r["id"] or cid in merged_away or nb["type"] != r["type"]:
                 continue
             pair = frozenset((r["id"], cid))
-            if pair in seen_pairs:
+            if pair in seen_pairs or pair in reviewed:
                 continue
             seen_pairs.add(pair)
             cvec = get_entity_vector(conn, cid)

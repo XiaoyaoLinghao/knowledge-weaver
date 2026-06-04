@@ -2,6 +2,16 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.2 — stop re-judging dismissed pairs (2026-06-04)
+
+### Fixed
+- Self-maintenance cost leak: with `KW_SEMANTIC_DEDUPE=review` +
+  `KW_TIEBREAK_REVIEWS=1`, every consolidation re-queued and re-judged (LLM cost)
+  the same vector-similar-but-distinct pairs, because a dismissed pair was not
+  treated as "already decided". Now `insert_review` is idempotent against
+  pending AND dismissed, and `semantic_dedupe` skips any pair that already has a
+  review — so a distinct pair is judged once, not every cron cycle.
+
 ## v1.1.1 — tie-break count fix (2026-06-04)
 
 ### Fixed
