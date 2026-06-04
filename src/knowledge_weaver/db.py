@@ -525,7 +525,14 @@ def merge_existing_entities(conn: sqlite3.Connection, from_id: str, into_id: str
         return False
 
     rels = [dict(r) for r in get_relations_for_entity(conn, from_id)]
-    snapshot = json.dumps({"entity": dict(src), "relations": rels}, ensure_ascii=False)
+    # K4: also snapshot dst's PRE-merge accumulators so rollback can restore them
+    # (the merge bumps day_count / unions source_lines / MINs first_seen / etc.).
+    snapshot = json.dumps({
+        "entity": dict(src),
+        "relations": rels,
+        "dst_pre": {k: dst[k] for k in
+                    ("day_count", "source_lines", "first_seen", "importance", "metadata")},
+    }, ensure_ascii=False)
 
     src_sources = json.loads(src["source_lines"] or "[]")
     dst_sources = json.loads(dst["source_lines"] or "[]")
@@ -567,11 +574,16 @@ def merge_existing_entities(conn: sqlite3.Connection, from_id: str, into_id: str
         nt = into_id if r["to_entity"] == from_id else r["to_entity"]
         if nf == nt:
             continue
-        insert_relation(conn, {
-            "id": generate_relation_id(nf, nt, r["rel_type"]),
-            "from_entity": nf, "to_entity": nt, "rel_type": r["rel_type"],
-            "weight": r.get("weight", 1.0), "evidence": r.get("evidence", ""),
-        }, auto_commit=False)
+        # K3: INSERT OR IGNORE (not REPLACE) — if the repointed edge collides with
+        # an edge dst already has, keep dst's existing weight/evidence instead of
+        # clobbering it with from's (which rollback could not restore).
+        conn.execute(
+            "INSERT OR IGNORE INTO relations "
+            "(id, from_entity, to_entity, rel_type, weight, evidence) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (generate_relation_id(nf, nt, r["rel_type"]), nf, nt, r["rel_type"],
+             r.get("weight", 1.0), r.get("evidence", "")),
+        )
 
     delete_entity(conn, from_id, auto_commit=False)  # also drops from_id's relations
     clean_entity_indexes(conn, from_id)
@@ -609,9 +621,30 @@ def rollback_merge(conn: sqlite3.Connection, log_id: int,
     for r in snap.get("relations", []):
         insert_relation(conn, r, auto_commit=False)
     into_id = row[0]
+    dst_pre = snap.get("dst_pre")
     if into_id:
         dst = get_entity(conn, into_id)
-        if dst:
+        if dst is not None and dst_pre:
+            # K4: restore dst's full pre-merge accumulators (day_count / source_lines
+            # / first_seen / importance / metadata) — not just strip one alias.
+            conn.execute(
+                "UPDATE entities SET day_count=?, source_lines=?, first_seen=?, "
+                "importance=?, metadata=?, updated_at=datetime('now') WHERE id=?",
+                (dst_pre["day_count"], dst_pre["source_lines"], dst_pre["first_seen"],
+                 dst_pre["importance"], dst_pre["metadata"], into_id),
+            )
+            try:
+                meta = json.loads(dst_pre["metadata"] or "{}")
+                conn.execute("DELETE FROM entity_fts WHERE entity_id=?", (into_id,))
+                conn.execute(
+                    "INSERT INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
+                    (into_id, fts_name_value(dst["name"], meta.get("aliases", [])),
+                     jieba_tokenize(dst["summary"]), dst["type"]),
+                )
+            except Exception:
+                pass
+        elif dst is not None:
+            # legacy snapshot without dst_pre: best-effort alias strip (old behavior)
             meta = json.loads(dst["metadata"] or "{}")
             aliases = [a for a in meta.get("aliases", []) if a != ent.get("name")]
             if aliases:
@@ -620,6 +653,12 @@ def rollback_merge(conn: sqlite3.Connection, log_id: int,
                 meta.pop("aliases", None)
             conn.execute("UPDATE entities SET metadata=? WHERE id=?",
                          (json.dumps(meta, ensure_ascii=False), into_id))
+    # K4: restore reviews this merge orphaned to 'stale' — the entity is back.
+    conn.execute(
+        "UPDATE merge_review SET status='pending', resolved_at=NULL "
+        "WHERE status='stale' AND (new_entity_id=? OR candidate_id=?)",
+        (ent["id"], ent["id"]),
+    )
     if auto_commit:
         conn.commit()
     return True
@@ -896,10 +935,15 @@ def _search_entity_vectors_vec(conn: sqlite3.Connection, query_vec: list[float],
     if not top_ids:
         return []
     placeholders = ",".join(["?" for _ in top_ids])
-    return conn.execute(
+    fetched = conn.execute(
         f"SELECT * FROM entities WHERE id IN ({placeholders})",
         top_ids,
     ).fetchall()
+    # K1: `IN (...)` returns rows in arbitrary order — restore the distance order
+    # from the vec0 query so callers (RRF fusion) get nearest-first. (Only the
+    # sqlite-vec path was affected; the Python fallback already sorts by score.)
+    by_id = {r["id"]: r for r in fetched}
+    return [by_id[i] for i in top_ids if i in by_id]
 
 
 def _search_entity_vectors_python(conn: sqlite3.Connection, query_vec: list[float],

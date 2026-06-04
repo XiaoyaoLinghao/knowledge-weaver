@@ -245,6 +245,20 @@ def link_cross_day(
     return []
 
 
+def _name_mentioned(name: str, text: str) -> bool:
+    """True if ``name`` appears in ``text`` as a whole token (K7).
+
+    Word-boundary match so a project 'Home' does NOT match inside 'HomeBrain',
+    while CJK names still match (CJK chars are not [A-Za-z0-9] so the boundaries
+    are satisfied around them).
+    """
+    if not name or not text:
+        return False
+    pat = re.compile(r"(?<![A-Za-z0-9])" + re.escape(name) + r"(?![A-Za-z0-9])",
+                     re.IGNORECASE)
+    return bool(pat.search(text))
+
+
 def link_project_dependencies(
     conn,
     entities: list[ExtractedEntity],
@@ -280,8 +294,8 @@ def link_project_dependencies(
         for project in projects:
             if not _is_substring_safe_project_name(project.name):
                 continue
-            if project.name.lower() in entity.name.lower() or \
-               project.name.lower() in entity.summary.lower():
+            if _name_mentioned(project.name, entity.name) or \
+               _name_mentioned(project.name, entity.summary):
                 rel = LinkedRelation(
                     id=generate_relation_id(entity.id, project.id, "DEPENDS_ON"),
                     from_entity=entity.id,

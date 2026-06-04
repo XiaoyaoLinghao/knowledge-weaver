@@ -19,8 +19,10 @@ def parse_indexed_verdicts(content: str, n: int) -> Optional[dict]:
     """Parse model output into ``{"1":v, ..., "N":v}`` or return None.
 
     Returns None (caller skips the chunk) when the content is not JSON, not an
-    object, or its key set is not exactly ``{"1".."N"}`` — the latter guards
-    against index shift / extra / missing keys mis-aligning verdicts to items.
+    object, or its keys do not COVER ``{"1".."N"}``. K8: require the expected
+    indices to be a subset (every item judged) but tolerate harmless extra keys
+    (e.g. a stray ``"note"``) instead of dropping the whole chunk — the caller only
+    reads keys ``"1".."N"`` so extras are ignored, and missing indices still fail.
     """
     cleaned = re.sub(r"^```(?:json)?|```$", "", content, flags=re.MULTILINE).strip()
     try:
@@ -30,7 +32,7 @@ def parse_indexed_verdicts(content: str, n: int) -> Optional[dict]:
     if not isinstance(mapping, dict):
         return None
     norm = {str(k): v for k, v in mapping.items()}
-    if set(norm.keys()) != {str(j) for j in range(1, n + 1)}:
+    if not {str(j) for j in range(1, n + 1)}.issubset(norm.keys()):
         return None
     return norm
 

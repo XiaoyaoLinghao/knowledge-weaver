@@ -208,9 +208,13 @@ def knowledge_search(
                 filtered.append(c)
         candidates = filtered
 
-    # Step 3: importance score filter
-    today = datetime.date.today()
-    scored_candidates = filter_by_score(candidates, min_score=min_score, today=today)
+    # Step 3: importance filter/sort. K5: use the STORED importance (the value
+    # written at ingest and shown in the result), not score_entity re-derived with
+    # access_count=0 — otherwise ranking/threshold disagree with the displayed score.
+    scored_candidates = sorted(
+        [c for c in candidates if (c.get("importance") or 0.0) >= min_score],
+        key=lambda c: c.get("importance") or 0.0, reverse=True,
+    )
 
     # Step 4: filter provisional projects before slicing (先滤后切,避免顶替丢失)
     reg = load_registered_slugs()
@@ -310,11 +314,12 @@ def knowledge_trace(
 
     # Build rel_type lookup from pre-collected relations (no extra DB query)
     source_rel_map: dict[str, tuple[str, float]] = {}
+    # K6: map EVERY collected edge's endpoints to its real type (setdefault keeps
+    # the first/closest discovery edge), so a depth>=2 entity reports its actual
+    # relation (DEPENDS_ON / 取代 / 矛盾 ...) instead of falling back to RELATES_TO.
     for rel in collected_rels:
-        if rel["from_entity"] == entity_id:
-            source_rel_map[rel["to_entity"]] = (rel["rel_type"], rel["weight"])
-        elif rel["to_entity"] == entity_id:
-            source_rel_map[rel["from_entity"]] = (rel["rel_type"], rel["weight"])
+        source_rel_map.setdefault(rel["to_entity"], (rel["rel_type"], rel["weight"]))
+        source_rel_map.setdefault(rel["from_entity"], (rel["rel_type"], rel["weight"]))
 
     # Build related entities list
     related = []
