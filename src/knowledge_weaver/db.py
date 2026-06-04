@@ -427,9 +427,15 @@ def get_entity_vector(conn: sqlite3.Connection, entity_id: str) -> Optional[list
 def insert_review(conn: sqlite3.Connection, *, kind: str, new_entity_id: str,
                   candidate_id: Optional[str], entity_type: str, score: float,
                   reason: str, auto_commit: bool = True) -> int:
-    """Queue a merge/purge candidate for human review (idempotent per pair)."""
+    """Queue a merge/purge candidate for human review (idempotent per pair).
+
+    Idempotent against pending AND dismissed: a dismissed pair means "already
+    judged not-the-same", so it is never re-queued — otherwise the self-maintenance
+    loop would re-surface and re-judge (LLM cost) the same distinct pairs every
+    consolidation cycle. (merged pairs can't recur — the entity is gone.)
+    """
     existing = conn.execute(
-        "SELECT id FROM merge_review WHERE status='pending' AND kind=? "
+        "SELECT id FROM merge_review WHERE status IN ('pending','dismissed') AND kind=? "
         "AND new_entity_id=? AND IFNULL(candidate_id,'')=IFNULL(?,'')",
         (kind, new_entity_id, candidate_id),
     ).fetchone()
