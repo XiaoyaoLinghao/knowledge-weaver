@@ -271,14 +271,33 @@ def build_fts_match(query: str) -> str:
     return " OR ".join('"' + t.replace('"', "") + '"' for t in toks)
 
 
+def _aliases_from_metadata(metadata: Optional[str]) -> list[str]:
+    """Extract the alias surface-forms stored in an entity's metadata JSON."""
+    try:
+        meta = json.loads(metadata or "{}")
+    except Exception:
+        return []
+    al = meta.get("aliases", []) if isinstance(meta, dict) else []
+    return [a for a in al if isinstance(a, str) and a.strip()]
+
+
+def fts_name_value(name: Optional[str], aliases: Optional[list[str]] = None) -> str:
+    """jieba-tokenized name PLUS its alias surface-forms, so a query using a
+    merged-away ('wrong'/variant) name still matches the surviving entity
+    lexically. Without this, aliases live only in metadata JSON, invisible to FTS."""
+    parts = [name or ""] + [a for a in (aliases or []) if a and a != name]
+    return jieba_tokenize(" ".join(p for p in parts if p))
+
+
 def rebuild_fts(conn: sqlite3.Connection, auto_commit: bool = True) -> int:
-    """Re-index entity_fts with jieba-segmented name/summary (one-off migration)."""
+    """Re-index entity_fts with jieba-segmented name(+aliases)/summary (one-off migration)."""
     conn.execute("DELETE FROM entity_fts")
-    rows = conn.execute("SELECT id, name, summary, type FROM entities").fetchall()
+    rows = conn.execute("SELECT id, name, summary, type, metadata FROM entities").fetchall()
     for r in rows:
         conn.execute(
             "INSERT INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
-            (r["id"], jieba_tokenize(r["name"]), jieba_tokenize(r["summary"]), r["type"]),
+            (r["id"], fts_name_value(r["name"], _aliases_from_metadata(r["metadata"])),
+             jieba_tokenize(r["summary"]), r["type"]),
         )
     if auto_commit:
         conn.commit()
@@ -353,12 +372,13 @@ def insert_entity(conn: sqlite3.Connection, entity: dict, auto_commit: bool = Tr
            metadata=excluded.metadata, updated_at=datetime('now')""",
         e,
     )
-    # Sync to FTS5 index
+    # Sync to FTS5 index (name+aliases so variant names stay lexically searchable)
     try:
         conn.execute("DELETE FROM entity_fts WHERE entity_id=?", (e["id"],))
         conn.execute(
             "INSERT INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
-            (e["id"], jieba_tokenize(e["name"]), jieba_tokenize(e["summary"]), e["type"]),
+            (e["id"], fts_name_value(e["name"], _aliases_from_metadata(e.get("metadata"))),
+             jieba_tokenize(e["summary"]), e["type"]),
         )
     except Exception:
         pass  # FTS table may not exist yet
@@ -519,6 +539,17 @@ def merge_existing_entities(conn: sqlite3.Connection, from_id: str, into_id: str
          max(src["importance"], dst["importance"]),
          src["first_seen"], src["day_count"], into_id),
     )
+
+    # Refresh dst's FTS row so the merged-away name (now an alias) is searchable.
+    try:
+        conn.execute("DELETE FROM entity_fts WHERE entity_id=?", (into_id,))
+        conn.execute(
+            "INSERT INTO entity_fts(entity_id, name, summary, type) VALUES (?, ?, ?, ?)",
+            (into_id, fts_name_value(dst["name"], aliases),
+             jieba_tokenize(dst["summary"]), dst["type"]),
+        )
+    except Exception:
+        pass
 
     from knowledge_weaver.linker import generate_relation_id
     for r in rels:
