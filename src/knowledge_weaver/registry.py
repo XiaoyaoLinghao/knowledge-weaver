@@ -231,7 +231,7 @@ def _parse_field(line: str) -> Optional[tuple[str, str]]:
 
 
 def load_registry(
-    path: str = "/root/.openclaw/workspace/MEMORY.md",
+    path: str = "/home/openclaw/.openclaw/workspace/MEMORY.md",
 ) -> list[ProjectEntry]:
     """Load project registry from MEMORY.md with mtime-based cache.
 
@@ -280,7 +280,7 @@ def registered_slugs(entries: list[ProjectEntry]) -> set[str]:
 
 
 def load_registered_slugs(
-    path: str = "/root/.openclaw/workspace/MEMORY.md",
+    path: str = "/home/openclaw/.openclaw/workspace/MEMORY.md",
 ) -> set[str]:
     """Convenience: load registry and return registered entity IDs.
 
@@ -339,7 +339,7 @@ def _main() -> None:
     parser = argparse.ArgumentParser(description="KW Project Registry Loader")
     parser.add_argument(
         "--path",
-        default="/root/.openclaw/workspace/MEMORY.md",
+        default="/home/openclaw/.openclaw/workspace/MEMORY.md",
         help="Path to MEMORY.md",
     )
     group = parser.add_mutually_exclusive_group(required=True)

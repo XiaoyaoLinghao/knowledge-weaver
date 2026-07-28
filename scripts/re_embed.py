@@ -125,5 +125,5 @@ def re_embed_all(db_path: str) -> None:
 
 
 if __name__ == "__main__":
-    db_path = os.environ.get("KNOWLEDGE_WEAVER_DB_PATH", "/root/.openclaw/knowledge/knowledge.db")
+    db_path = os.environ.get("KNOWLEDGE_WEAVER_DB_PATH", "/home/openclaw/.openclaw/knowledge/knowledge.db")
     re_embed_all(db_path)

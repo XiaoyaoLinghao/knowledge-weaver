@@ -817,7 +817,7 @@ def reconcile_registry_deletions(conn, *, registry_path: str | None = None,
     from knowledge_weaver.registry import load_registry, registered_slugs
 
     path = registry_path or os.environ.get(
-        "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/root/.openclaw/workspace/MEMORY.md"
+        "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/home/openclaw/.openclaw/workspace/MEMORY.md"
     )
     current = registered_slugs(load_registry(path))
     previous = previous_registered_slugs(conn)
@@ -858,7 +858,7 @@ def ensure_registered_project_entities(conn, *, registry_path: str | None = None
     from knowledge_weaver.registry import load_registry
 
     path = registry_path or os.environ.get(
-        "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/root/.openclaw/workspace/MEMORY.md"
+        "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/home/openclaw/.openclaw/workspace/MEMORY.md"
     )
     today = datetime.date.today().isoformat()
     created: list[str] = []

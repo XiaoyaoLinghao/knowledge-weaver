@@ -263,7 +263,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--db-path",
-        default="/root/.openclaw/knowledge/knowledge.db",
+        default="/home/openclaw/.openclaw/knowledge/knowledge.db",
         help="Path to the Knowledge Weaver SQLite database",
     )
     parser.add_argument(

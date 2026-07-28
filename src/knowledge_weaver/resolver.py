@@ -134,7 +134,7 @@ def load_alias_map() -> dict[str, str]:
         from knowledge_weaver.registry import alias_to_canonical_map, load_registry
 
         path = os.environ.get(
-            "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/root/.openclaw/workspace/MEMORY.md"
+            "KNOWLEDGE_WEAVER_REGISTRY_PATH", "/home/openclaw/.openclaw/workspace/MEMORY.md"
         )
         return alias_to_canonical_map(load_registry(path))
     except Exception:

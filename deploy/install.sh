@@ -6,7 +6,7 @@ echo "=== Knowledge Weaver Installation ==="
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Create directories
-mkdir -p /root/.openclaw/knowledge /root/.openclaw/logs
+mkdir -p /home/openclaw/.openclaw/knowledge /home/openclaw/.openclaw/logs
 
 # Install package
 cd "$SCRIPT_DIR/.."

@@ -210,8 +210,8 @@ def test_default_env_values():
         import knowledge_weaver.server as srv
         importlib.reload(srv)
 
-        assert srv.DB_PATH == "/root/.openclaw/knowledge/knowledge.db"
-        assert srv.MEMORY_DIR == "/root/.openclaw/workspace/memory"
+        assert srv.DB_PATH == "/home/openclaw/.openclaw/knowledge/knowledge.db"
+        assert srv.MEMORY_DIR == "/home/openclaw/.openclaw/workspace/memory"
         assert srv.LOG_LEVEL == "INFO"
     finally:
         if saved_db is not None:
