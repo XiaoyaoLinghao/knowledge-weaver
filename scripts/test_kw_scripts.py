@@ -9,6 +9,7 @@ Run with:
 import json
 import os
 import sqlite3
+import shutil
 import sys
 import tempfile
 import time
@@ -211,6 +212,7 @@ class TestHealthCheckDB(unittest.TestCase):
         kw_weekly_trend.REPORTS_DIR = cls._save["wr"]
         kw_weekly_trend.WEEKLY_DIR = cls._save["ww"]
         kw_weekly_trend.HISTORY_PATH = cls._save["hh"]
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     def setUp(self):
         for d in [
@@ -256,7 +258,9 @@ class TestHealthCheckDB(unittest.TestCase):
         r = kw_health_check.check_cross_day_aggregation(c)
         self.assertEqual(r["day2_entities"], 3)  # e3, e4, e9
         self.assertAlmostEqual(r["day2_ratio"], 0.3, places=2)
-        self.assertEqual(r["status"], "ok")  # 30% < 50%
+        self.assertEqual(r["status"], "info")
+        self.assertFalse(r["affects_overall"])
+        self.assertIn("day_count 不具备跨日统计语义", r["message"])
         conn.close()
 
     def test_check_type_distribution(self):
@@ -408,6 +412,7 @@ class TestDMAHealthCheck(unittest.TestCase):
         cls.tmpdir = tempfile.mkdtemp(prefix="kw_dma_test_")
         cls.log_path = os.path.join(cls.tmpdir, "dma.log")
         cls.checkpoint_path = os.path.join(cls.tmpdir, "checkpoint.json")
+        cls.status_path = os.path.join(cls.tmpdir, "runtime_status.json")
         cls.memory_dir = os.path.join(cls.tmpdir, "memory")
         os.makedirs(cls.memory_dir, exist_ok=True)
 
@@ -415,27 +420,34 @@ class TestDMAHealthCheck(unittest.TestCase):
         cls._save_paths = {
             "log": kw_health_check.DMA_LOG_PATH,
             "cp": kw_health_check.DMA_CHECKPOINT_PATH,
+            "status": kw_health_check.DMA_STATUS_PATH,
             "mem": kw_health_check.MEMORY_DIR,
         }
 
         # Override to temp paths
         kw_health_check.DMA_LOG_PATH = cls.log_path
         kw_health_check.DMA_CHECKPOINT_PATH = cls.checkpoint_path
+        kw_health_check.DMA_STATUS_PATH = cls.status_path
         kw_health_check.MEMORY_DIR = cls.memory_dir
 
     @classmethod
     def tearDownClass(cls):
         kw_health_check.DMA_LOG_PATH = cls._save_paths["log"]
         kw_health_check.DMA_CHECKPOINT_PATH = cls._save_paths["cp"]
+        kw_health_check.DMA_STATUS_PATH = cls._save_paths["status"]
         kw_health_check.MEMORY_DIR = cls._save_paths["mem"]
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     def setUp(self):
         """Clean up temp files before each test."""
         for p in [self.log_path, self.checkpoint_path]:
             if os.path.isfile(p):
                 os.remove(p)
+        if os.path.isfile(self.status_path):
+            os.remove(self.status_path)
         for f in os.listdir(self.memory_dir):
             os.remove(os.path.join(self.memory_dir, f))
+        self._write_status()
 
     def _write_log(self, *lines: str, mtime_hours_ago: float | None = None) -> None:
         """Write lines to the test DMA log.
@@ -456,6 +468,40 @@ class TestDMAHealthCheck(unittest.TestCase):
         with open(self.checkpoint_path, "w") as f:
             f.write('{"key": "value"}')
 
+    def _write_status(self, *, outcome: str = "idle", pending_count: int | None = 0) -> None:
+        """Write a fresh minimal DMA runtime-status-v1 fixture."""
+        from datetime import datetime, timedelta, timezone
+        observed = datetime.now(timezone.utc) - timedelta(minutes=1)
+        finished = None if outcome == "running" else observed.isoformat()
+        timestamp = observed.isoformat()
+        payload = {
+            "schema_version": "dma-runtime-status-v1",
+            "run_id": "legacy-test-run",
+            "started_at": (observed - timedelta(minutes=1)).isoformat(),
+            "observed_at": timestamp,
+            "finished_at": finished,
+            "outcome": outcome,
+            "reason": "test",
+            "last_completed_at": finished,
+            "last_archived_at": None,
+            "pending_count": pending_count,
+            "oldest_pending_at": None,
+            "pending_reconcile_count": 0,
+            "oldest_reconcile_at": None,
+            "checkpoint_progress_at": timestamp,
+            "failures": {
+                operation: {
+                    "consecutive": 0,
+                    "last_failed_at": None,
+                    "last_recovered_at": None,
+                }
+                for operation in ("storage", "summary", "archive")
+            },
+            "status_errors": [],
+        }
+        with open(self.status_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+
     def _write_today_memory(self, content: str = "x" * 200) -> str:
         """Write today's memory file and return its path."""
         from datetime import date
@@ -467,16 +513,16 @@ class TestDMAHealthCheck(unittest.TestCase):
     # ── No files at all ──
 
     def test_all_files_missing(self):
+        os.remove(self.status_path)
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "alert")
+        self.assertEqual(r["status"], "warning")
         self.assertIsNone(r["log_freshness_hours"])
         self.assertEqual(r["error_count_24h"], 0)
         self.assertFalse(r["memory_file_exists"])
         self.assertEqual(r["memory_file_size"], 0)
         self.assertIsNone(r["checkpoint_freshness_hours"])
-        self.assertIn("日志文件不存在", r["message"])
-        self.assertIn("Memory 文件缺失", r["message"])
-        self.assertIn("检查点文件不存在", r["message"])
+        self.assertEqual(r["runtime_status_error"], "dma_status_missing")
+        self.assertIn("runtime status 尚未提供", r["message"])
 
     # ── Healthy state ──
 
@@ -504,9 +550,9 @@ class TestDMAHealthCheck(unittest.TestCase):
         self._write_today_memory()
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "warning")
+        self.assertEqual(r["status"], "ok")
         self.assertGreater(r["log_freshness_hours"], 12)
-        self.assertIn("可能延迟", r["message"])
+        self.assertNotIn("可能延迟", r["message"])
 
     def test_log_stale_25h_alert(self):
         now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -515,9 +561,9 @@ class TestDMAHealthCheck(unittest.TestCase):
         self._write_today_memory()
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "alert")
+        self.assertEqual(r["status"], "ok")
         self.assertGreater(r["log_freshness_hours"], 24)
-        self.assertIn("静默停摆", r["message"])
+        self.assertNotIn("静默停摆", r["message"])
 
     # ── ERROR scanning ──
 
@@ -531,8 +577,8 @@ class TestDMAHealthCheck(unittest.TestCase):
 
         r = kw_health_check.check_dma_health()
         self.assertEqual(r["error_count_24h"], 1)
-        self.assertEqual(r["status"], "warning")
-        self.assertIn("ERROR/FATAL", r["message"])
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("历史信息", r["message"])
 
     def test_error_count_alert(self):
         now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -543,8 +589,8 @@ class TestDMAHealthCheck(unittest.TestCase):
 
         r = kw_health_check.check_dma_health()
         self.assertEqual(r["error_count_24h"], 11)
-        self.assertEqual(r["status"], "alert")
-        self.assertIn("持续故障", r["message"])
+        self.assertEqual(r["status"], "ok")
+        self.assertIn("历史信息", r["message"])
 
     def test_chinese_error_keywords_detected(self):
         now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -558,7 +604,7 @@ class TestDMAHealthCheck(unittest.TestCase):
 
         r = kw_health_check.check_dma_health()
         self.assertEqual(r["error_count_24h"], 3)
-        self.assertEqual(r["status"], "warning")
+        self.assertEqual(r["status"], "ok")
 
     def test_old_errors_excluded(self):
         """Errors older than 7 days should not be counted."""
@@ -584,10 +630,10 @@ class TestDMAHealthCheck(unittest.TestCase):
         # No memory file written — but checkpoint is fresh → warning, not alert
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "warning")
+        self.assertEqual(r["status"], "ok")
         self.assertFalse(r["memory_file_exists"])
         self.assertEqual(r["memory_file_size"], 0)
-        self.assertIn("尚未生成", r["message"])
+        self.assertIn("没有待归档消息", r["message"])
 
     def test_memory_file_missing_with_stale_checkpoint(self):
         from datetime import datetime, timedelta
@@ -601,10 +647,10 @@ class TestDMAHealthCheck(unittest.TestCase):
         # No memory file written + stale checkpoint → alert
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "alert")
+        self.assertEqual(r["status"], "ok")
         self.assertFalse(r["memory_file_exists"])
         self.assertEqual(r["memory_file_size"], 0)
-        self.assertIn("归档可能停摆", r["message"])
+        self.assertIn("没有待归档消息", r["message"])
 
     def test_memory_file_too_small(self):
         now_ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -616,7 +662,7 @@ class TestDMAHealthCheck(unittest.TestCase):
         self.assertEqual(r["status"], "warning")
         self.assertTrue(r["memory_file_exists"])
         self.assertEqual(r["memory_file_size"], 4)
-        self.assertIn("异常小", r["message"])
+        self.assertIn("较小", r["message"])
 
     # ── Checkpoint freshness ──
 
@@ -633,7 +679,7 @@ class TestDMAHealthCheck(unittest.TestCase):
         os.utime(self.checkpoint_path, (ts, ts))
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "warning")
+        self.assertEqual(r["status"], "ok")
         self.assertGreater(r["checkpoint_freshness_hours"], 24)
         self.assertLess(r["checkpoint_freshness_hours"], 49)
 
@@ -649,9 +695,9 @@ class TestDMAHealthCheck(unittest.TestCase):
         os.utime(self.checkpoint_path, (ts, ts))
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "alert")
+        self.assertEqual(r["status"], "ok")
         self.assertGreater(r["checkpoint_freshness_hours"], 48)
-        self.assertIn("检查点卡死", r["message"])
+        self.assertNotIn("检查点卡死", r["message"])
 
     # ── Worst-case: all problems at once ──
 
@@ -670,7 +716,7 @@ class TestDMAHealthCheck(unittest.TestCase):
         # No memory file
 
         r = kw_health_check.check_dma_health()
-        self.assertEqual(r["status"], "alert")
+        self.assertEqual(r["status"], "ok")
         self.assertGreater(r["log_freshness_hours"], 24)
         self.assertEqual(r["error_count_24h"], 12)
         self.assertFalse(r["memory_file_exists"])

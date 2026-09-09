@@ -12,22 +12,44 @@ Usage:
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
 import sys
-from datetime import date, datetime, timedelta
+import tempfile
+import uuid
+from datetime import date, datetime, timedelta, timezone
+
+import dma_status
 
 # ── Absolute paths ───────────────────────────────────────────────────────────
 
-DB_PATH = "/home/openclaw/.openclaw/knowledge/knowledge.db"
-REPORTS_DIR = "/home/openclaw/.openclaw/knowledge/health_reports"
+DB_PATH = os.environ.get(
+    "KNOWLEDGE_WEAVER_DB_PATH", "/home/openclaw/.openclaw/knowledge/knowledge.db"
+)
+REPORTS_DIR = os.environ.get(
+    "KW_HEALTH_REPORTS_DIR", "/home/openclaw/.openclaw/knowledge/health_reports"
+)
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# DMA health check paths (module-level for testability)
-DMA_LOG_PATH = "/home/openclaw/.openclaw/logs/daily-memory-archiver.log"
-DMA_CHECKPOINT_PATH = "/home/openclaw/.openclaw/skills/daily-memory-archiver/config/.archive_merge_checkpoint.json"
-MEMORY_DIR = "/home/openclaw/.openclaw/workspace/memory/"
+# DMA diagnostic paths (module-level for testability).  Runtime state is read
+# from the versioned status file; logs, checkpoints and Memory files are kept
+# as supporting diagnostics only.
+DMA_LOG_PATH = os.environ.get(
+    "KW_DMA_LOG_PATH", "/home/openclaw/.openclaw/logs/daily-memory-archiver.log"
+)
+DMA_CHECKPOINT_PATH = os.environ.get(
+    "KW_DMA_CHECKPOINT_PATH",
+    "/home/openclaw/.openclaw/skills/daily-memory-archiver/config/.archive_merge_checkpoint.json",
+)
+MEMORY_DIR = os.environ.get(
+    "KNOWLEDGE_WEAVER_MEMORY_DIR", "/home/openclaw/.openclaw/workspace/memory/"
+)
+DMA_STATUS_PATH = dma_status.DEFAULT_STATUS_PATH
+DMA_EXPECTED_INTERVAL_SECONDS = dma_status.DEFAULT_EXPECTED_INTERVAL_SECONDS
+DMA_STATUS_TIMEOUT_SECONDS = dma_status.DEFAULT_STATUS_TIMEOUT_SECONDS
+DMA_BACKLOG_TIMEOUT_SECONDS = dma_status.DEFAULT_BACKLOG_TIMEOUT_SECONDS
 
 # Known entity types
 KNOWN_TYPES = ("tech", "decision", "risk", "preference", "task", "idea", "fact", "project")
@@ -64,131 +86,245 @@ def check_entity_total(cur: sqlite3.Cursor) -> dict:
 
 def _severity_worse(a: str, b: str) -> str:
     """Return the worse (higher priority) of two severity levels."""
-    order = {"ok": 0, "warning": 1, "alert": 2}
+    order = {"ok": 0, "info": 0, "unknown": 1, "warning": 1, "alert": 2}
     return a if order.get(a, 0) >= order.get(b, 0) else b
 
 
-def check_dma_health() -> dict:
-    """Check DMA (Daily Memory Archiver) health.
+def _aware_now(value: datetime | None = None) -> datetime:
+    """Return an aware local timestamp for report and diagnostic comparisons."""
+    current = value or datetime.now().astimezone()
+    if current.tzinfo is None or current.utcoffset() is None:
+        current = current.astimezone()
+    return current
 
-    Performs read-only checks on DMA log freshness, error counts,
-    memory file output, and checkpoint freshness.
+
+def _configured_dma_status_path(path: str | None = None) -> str:
+    """Resolve the testable status path, honoring KW_DMA_STATUS_PATH."""
+    if path:
+        return path
+    return os.environ.get("KW_DMA_STATUS_PATH") or DMA_STATUS_PATH
+
+
+def _configured_seconds(name: str, default: int, override: int | float | None) -> float:
+    """Read a positive finite duration from an explicit value or environment."""
+    value: int | float | str = override if override is not None else os.environ.get(name, default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return parsed
+
+
+def _scan_dma_log(now: datetime) -> tuple[float | None, int, str | None]:
+    """Return log age, recent error count, and an observation error code.
+
+    Log data is retained for context only.  It never decides recovery or DMA
+    health once runtime-status-v1 is available.
     """
-    now = datetime.now()
-    today_str = date.today().isoformat()
-    status = "ok"
+    if not os.path.isfile(DMA_LOG_PATH):
+        return None, 0, None
+
+    try:
+        mtime = datetime.fromtimestamp(os.path.getmtime(DMA_LOG_PATH), now.tzinfo)
+        log_age_hours = round(max(0.0, (now - mtime).total_seconds()) / 3600, 2)
+        cutoff = now - timedelta(days=1)
+        error_count = 0
+        error_pattern = re.compile(r"(ERROR|FATAL|错误|失败|无法)", re.IGNORECASE)
+        in_old_block = False
+        with open(DMA_LOG_PATH, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("[") and len(line) > 20:
+                    try:
+                        line_ts = datetime.strptime(
+                            line[1:20], "%Y-%m-%d %H:%M:%S"
+                        ).replace(tzinfo=now.tzinfo)
+                        in_old_block = line_ts < cutoff
+                    except ValueError:
+                        # An unparsable line is diagnostic noise; retain the
+                        # previous timestamp block just as the old scanner did.
+                        pass
+                if not in_old_block and error_pattern.search(line):
+                    error_count += 1
+        return log_age_hours, error_count, None
+    except (OSError, UnicodeError):
+        return None, 0, "dma_log_observation_failed"
+
+
+def _path_age_hours(path: str, now: datetime) -> tuple[float | None, str | None]:
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        mtime = datetime.fromtimestamp(os.path.getmtime(path), now.tzinfo)
+        return round(max(0.0, (now - mtime).total_seconds()) / 3600, 2), None
+    except OSError:
+        return None, "dma_checkpoint_observation_failed"
+
+
+def check_dma_health(
+    *,
+    now: datetime | None = None,
+    status_path: str | None = None,
+    expected_interval_seconds: int | float | None = None,
+    status_timeout_seconds: int | float | None = None,
+    backlog_timeout_seconds: int | float | None = None,
+) -> dict:
+    """Check DMA using runtime-status-v1 and read-only diagnostics.
+
+    A missing status file is a rollout ``warning`` with incomplete evidence.
+    Malformed, unreadable or stale status is an ``alert``.  Historical log
+    errors, checkpoint mtime and today's Memory-file absence are informational
+    unless the versioned runtime status proves a current failure or backlog.
+    """
+    current = _aware_now(now)
+    expected_interval = _configured_seconds(
+        "KW_DMA_EXPECTED_INTERVAL_SECONDS",
+        DMA_EXPECTED_INTERVAL_SECONDS,
+        expected_interval_seconds,
+    )
+    status_timeout = _configured_seconds(
+        "KW_DMA_STATUS_TIMEOUT_SECONDS",
+        DMA_STATUS_TIMEOUT_SECONDS,
+        status_timeout_seconds,
+    )
+    backlog_timeout = _configured_seconds(
+        "KW_DMA_BACKLOG_TIMEOUT_SECONDS",
+        DMA_BACKLOG_TIMEOUT_SECONDS,
+        backlog_timeout_seconds,
+    )
+    today_str = current.date().isoformat()
     messages: list[str] = []
+    status_errors: list[str] = []
 
-    # ── 1. Log freshness ──
-    log_freshness_hours: float | None = None
-    if os.path.isfile(DMA_LOG_PATH):
-        log_mtime = datetime.fromtimestamp(os.path.getmtime(DMA_LOG_PATH))
-        log_freshness_hours = round((now - log_mtime).total_seconds() / 3600, 2)
-        if log_freshness_hours > 24:
-            status = _severity_worse(status, "alert")
-            messages.append(
-                f"DMA 日志超过 24 小时未更新（{log_freshness_hours:.1f}h），可能静默停摆"
-            )
-        elif log_freshness_hours > 12:
-            status = _severity_worse(status, "warning")
-            messages.append(
-                f"DMA 日志超过 12 小时未更新（{log_freshness_hours:.1f}h），可能延迟"
-            )
-    else:
-        log_freshness_hours = None
-        status = _severity_worse(status, "alert")
-        messages.append("DMA 日志文件不存在（DMA 可能未安装或已停摆）")
+    log_freshness_hours, error_count_24h, log_error = _scan_dma_log(current)
+    if log_error:
+        status_errors.append(log_error)
+    checkpoint_freshness_hours, checkpoint_error = _path_age_hours(
+        DMA_CHECKPOINT_PATH, current
+    )
+    if checkpoint_error:
+        status_errors.append(checkpoint_error)
 
-    # ── 2. ERROR/FATAL scan (past 24h) ──
-    error_count_24h = 0
-    cutoff = now - timedelta(days=1)
-    error_pattern = re.compile(r"(ERROR|FATAL|错误|失败|无法)", re.IGNORECASE)
-    if os.path.isfile(DMA_LOG_PATH):
-        try:
-            with open(DMA_LOG_PATH, "r") as f:
-                in_old_block = False
-                for line in f:
-                    if line.startswith("[") and len(line) > 20:
-                        try:
-                            line_ts = datetime.strptime(
-                                line[1:20], "%Y-%m-%d %H:%M:%S"
-                            )
-                            in_old_block = line_ts < cutoff
-                        except ValueError:
-                            pass
-                    if in_old_block:
-                        continue
-                    if error_pattern.search(line):
-                        error_count_24h += 1
-        except OSError:
-            pass
-
-    if error_count_24h > 10:
-        status = _severity_worse(status, "alert")
-        messages.append(
-            f"DMA 日志中近 24 小时出现 {error_count_24h} 条 ERROR/FATAL（持续故障）"
-        )
-    elif error_count_24h > 0:
-        status = _severity_worse(status, "warning")
-        messages.append(
-            f"DMA 日志中近 24 小时出现 {error_count_24h} 条 ERROR/FATAL"
-        )
-
-    # ── 3. Checkpoint freshness (before memory check — used to qualify file-missing alerts) ──
-    checkpoint_freshness_hours: float | None = None
-    if os.path.isfile(DMA_CHECKPOINT_PATH):
-        cp_mtime = datetime.fromtimestamp(os.path.getmtime(DMA_CHECKPOINT_PATH))
-        checkpoint_freshness_hours = round(
-            (now - cp_mtime).total_seconds() / 3600, 2
-        )
-        if checkpoint_freshness_hours > 48:
-            status = _severity_worse(status, "alert")
-            messages.append(
-                f"DMA 检查点超过 48 小时未更新（{checkpoint_freshness_hours:.1f}h），检查点卡死"
-            )
-        elif checkpoint_freshness_hours > 24:
-            status = _severity_worse(status, "warning")
-            messages.append(
-                f"DMA 检查点超过 24 小时未更新（{checkpoint_freshness_hours:.1f}h）"
-            )
-    else:
-        checkpoint_freshness_hours = None
-
-    # ── 4. Memory file output ──
     memory_file_exists = False
     memory_file_size = 0
     memory_path = os.path.join(MEMORY_DIR, f"{today_str}.md")
-    if os.path.isfile(memory_path):
-        memory_file_exists = True
-        memory_file_size = os.path.getsize(memory_path)
-        if memory_file_size < 100:
-            status = _severity_worse(status, "warning")
-            messages.append(
-                f"今日 Memory 文件存在但异常小（{memory_file_size} bytes），产出可能为空"
-            )
-    elif (checkpoint_freshness_hours is not None
-          and checkpoint_freshness_hours <= 24):
-        # Checkpoint is fresh → DMA is running, just hasn't created today's file yet
-        status = _severity_worse(status, "warning")
-        messages.append(
-            f"今日 Memory 文件尚未生成（{today_str}.md），但 DMA 检查点 {checkpoint_freshness_hours:.1f}h 前已更新，今日首次归档可能尚未触发"
-        )
-    elif checkpoint_freshness_hours is None:
-        status = _severity_worse(status, "alert")
-        messages.append(
-            f"今日 Memory 文件缺失（{today_str}.md），且 DMA 检查点文件不存在，DMA 可能未安装"
-        )
-    else:
-        status = _severity_worse(status, "alert")
-        messages.append(
-            f"今日 Memory 文件缺失（{today_str}.md），且 DMA 检查点已 {checkpoint_freshness_hours:.1f}h 未更新，归档可能停摆"
-        )
+    try:
+        if os.path.isfile(memory_path):
+            memory_file_exists = True
+            memory_file_size = os.path.getsize(memory_path)
+    except OSError:
+        status_errors.append("memory_observation_failed")
 
-    # ── Build message ──
+    runtime_status: dict | None = None
+    runtime_public: dict | None = None
+    runtime_status_errors: list[str] = []
+    runtime_classification: dict
+    runtime_error: str | None = None
+    resolved_status_path = _configured_dma_status_path(status_path)
+    try:
+        runtime_status = dma_status.read_dma_status(
+            resolved_status_path,
+            now=current,
+            status_timeout_seconds=status_timeout,
+        )
+        runtime_classification = dma_status.classify_status(
+            runtime_status,
+            now=current,
+            expected_interval_seconds=expected_interval,
+            status_timeout_seconds=status_timeout,
+            backlog_timeout_seconds=backlog_timeout,
+        )
+        runtime_public = dma_status.public_status(runtime_status)
+        runtime_status_errors = list(runtime_status.get("status_errors", []))
+    except dma_status.DmaStatusMissingError:
+        runtime_error = dma_status.DmaStatusMissingError.code
+        runtime_classification = {
+            "status": "warning",
+            "level": "warning",
+            "state": "unknown",
+            "message": "DMA runtime status 尚未提供，当前无法确认最近一次运行结果",
+            "alert_codes": [],
+            "warning_codes": [runtime_error],
+            "recovered_operations": [],
+            "evidence_complete": False,
+        }
+    except dma_status.DmaStatusStaleError as exc:
+        runtime_error = dma_status.DmaStatusStaleError.code
+        runtime_classification = {
+            "status": "alert",
+            "level": "alert",
+            "state": "stale",
+            "message": str(exc),
+            "alert_codes": [runtime_error],
+            "warning_codes": [],
+            "recovered_operations": [],
+            "evidence_complete": False,
+        }
+        if exc.status is not None:
+            runtime_status = exc.status
+            runtime_status_errors = list(exc.status.get("status_errors", []))
+            runtime_public = dma_status.public_status(exc.status)
+            runtime_public["age_seconds"] = exc.age_seconds
+            runtime_public["stale"] = True
+    except dma_status.DmaStatusError as exc:
+        runtime_error = exc.code
+        runtime_classification = {
+            "status": "alert",
+            "level": "alert",
+            "state": "invalid",
+            "message": str(exc),
+            "alert_codes": [runtime_error],
+            "warning_codes": [],
+            "recovered_operations": [],
+            "evidence_complete": False,
+        }
+
+    status = runtime_classification["status"]
+    if runtime_classification.get("level") == "info" and status == "ok":
+        status = "info"
+    # Diagnostic failures are evidence failures, even though the runtime file
+    # itself may describe a healthy service.
+    if status_errors:
+        status = _severity_worse(status, "alert")
+        messages.append("DMA 健康检查无法读取部分诊断信息")
+    messages.append(runtime_classification["message"])
+
+    if error_count_24h:
+        messages.append(f"DMA 日志近 24 小时记录 {error_count_24h} 条错误（历史信息）")
+
+    if memory_file_exists and memory_file_size < 100:
+        status = _severity_worse(status, "warning")
+        messages.append(f"今日 Memory 文件存在但较小（{memory_file_size} bytes），请人工查看")
+    elif not memory_file_exists:
+        # Absence alone is normal for idle/noise-only runs with no expected
+        # output.  Do not infer anything from checkpoint or log mtime.
+        if runtime_status and runtime_status.get("pending_count") == 0 and runtime_status.get(
+            "outcome"
+        ) in {"idle", "noise_only", "deferred"}:
+            messages.append("当前快照没有待归档消息，今日无需创建 Memory 文件")
+        elif runtime_status and runtime_status.get("pending_count") == 0 and runtime_status.get(
+            "outcome"
+        ) == "archived":
+            messages.append("当前快照没有待归档消息，今日没有新增 Memory 文件")
+        elif not runtime_status:
+            messages.append("今日 Memory 文件是否应生成无法由缺失的 DMA 状态判断")
+        else:
+            messages.append("今日 Memory 文件尚未生成；请结合 DMA 运行结果判断")
+
+    if checkpoint_freshness_hours is not None:
+        messages.append(f"DMA 检查点最近更新于 {checkpoint_freshness_hours:.1f}h 前（诊断信息）")
+
+    if status == "ok" and runtime_status and not status_errors:
+        messages.append("DMA 健康检查通过")
     if not messages:
-        message = "DMA 健康检查通过"
-    else:
-        message = "; ".join(messages)
+        messages.append("DMA 健康检查通过")
+
+    # A running/unknown status is intentionally incomplete.  A terminal alert
+    # is still a valid, complete service observation and should exit 0.
+    evidence_complete = bool(runtime_classification.get("evidence_complete", False))
+    if status_errors:
+        evidence_complete = False
 
     return {
         "log_freshness_hours": log_freshness_hours,
@@ -197,7 +333,20 @@ def check_dma_health() -> dict:
         "memory_file_size": memory_file_size,
         "checkpoint_freshness_hours": checkpoint_freshness_hours,
         "status": status,
-        "message": message,
+        "runtime_level": runtime_classification.get("level", status),
+        "runtime_state": runtime_classification.get("state", "unknown"),
+        "runtime_outcome": runtime_status.get("outcome") if runtime_status else None,
+        "runtime_status": runtime_public,
+        "runtime_status_path": resolved_status_path,
+        "runtime_status_error": runtime_error,
+        "status_errors": status_errors + runtime_status_errors,
+        "diagnostic_errors": status_errors,
+        "runtime_status_errors": runtime_status_errors,
+        "alert_codes": runtime_classification.get("alert_codes", []),
+        "warning_codes": runtime_classification.get("warning_codes", []),
+        "recovered_operations": runtime_classification.get("recovered_operations", []),
+        "evidence_complete": evidence_complete,
+        "message": "; ".join(messages),
     }
 
 
@@ -248,20 +397,38 @@ def check_name_conflicts(cur: sqlite3.Cursor) -> dict:
 
 
 def check_cross_day_aggregation(cur: sqlite3.Cursor) -> dict:
-    """Cross-day aggregation quality — checks day_count=2 ratio."""
+    """Report legacy day_count statistics without treating them as a check.
+
+    ``day_count`` currently mixes occurrence and processing counts, so its
+    ratio cannot prove cross-day aggregation quality.  Keep the distribution
+    visible for migration analysis, but never let it affect overall health.
+    """
     cur.execute("SELECT COUNT(*) AS total FROM entities")
     total = cur.fetchone()["total"]
     if total == 0:
-        return {"day2_entities": 0, "day2_ratio": 0.0, "status": "ok", "message": "No entities"}
+        return {
+            "day2_entities": 0,
+            "day2_ratio": 0.0,
+            "status": "info",
+            "state": "unknown",
+            "affects_overall": False,
+            "message": "No entities; cross-day aggregation is informational",
+        }
 
     cur.execute("SELECT COUNT(*) AS cnt FROM entities WHERE day_count = 2")
     day2 = cur.fetchone()["cnt"]
     ratio = round(day2 / total, 4)
-    status = "alert" if ratio > 0.50 else "ok"
-    message = (f"聚合失效：{ratio:.1%} 实体未跨文件合并（day_count=2）"
-               if ratio > 0.50 else "Cross-day aggregation acceptable")
-    return {"day2_entities": day2, "day2_ratio": ratio,
-            "status": status, "message": message}
+    return {
+        "day2_entities": day2,
+        "day2_ratio": ratio,
+        "status": "info",
+        "state": "unknown",
+        "affects_overall": False,
+        "message": (
+            f"跨日聚合仅作信息展示：{ratio:.1%} 实体 day_count=2；"
+            "现有 day_count 不具备跨日统计语义"
+        ),
+    }
 
 
 def check_type_distribution(cur: sqlite3.Cursor) -> dict:
@@ -482,134 +649,184 @@ def compare_with_previous(current_total: int, prev: dict | None) -> dict:
 
 # ── Main orchestrator ────────────────────────────────────────────────────────
 
-def run_health_check(dry_run: bool = False) -> str:
-    """Execute all checks and return the JSON report string.
 
-    Returns the JSON string.  Writes to file unless dry_run is True.
-    Exits with code 1 on critical failure (DB unreadable).
+class HealthCheckError(RuntimeError):
+    """The checker could not produce complete evidence."""
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    """Publish a report atomically without leaving partial JSON behind."""
+    parent = os.path.dirname(os.path.abspath(path)) or "."
+    ensure_dir(parent)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=parent,
+            prefix=".kw-health-",
+            suffix=".json",
+            delete=False,
+        ) as handle:
+            temporary = handle.name
+            handle.write(text)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+
+
+def _run_one_check(
+    checks: dict[str, dict],
+    checker_errors: list[str],
+    name: str,
+    function,
+    *args,
+) -> None:
+    """Run one check and fail closed on every exception type."""
+    try:
+        checks[name] = function(*args)
+    except Exception as exc:  # noqa: BLE001 - checker must fail closed
+        checker_errors.append(name)
+        checks[name] = {
+            "status": "alert",
+            "error": f"health_check_failed:{name}",
+            "error_type": type(exc).__name__,
+            "message": "健康检查自身失败：" + name,
+        }
+
+
+def run_health_check(
+    dry_run: bool = False,
+    *,
+    run_id: str | None = None,
+    output_path: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Execute all checks and return the versioned JSON report.
+
+    ``--output`` selects an invocation-owned report path.  With no explicit
+    path, normal runs retain the historical dated report location.  Dry runs
+    never create ``REPORTS_DIR`` or any output file.  The returned report may
+    still contain a service alert; callers decide exit status from
+    ``checks_complete`` and ``checker_errors``.
     """
-    # Validate / create directories
-    ensure_dir(REPORTS_DIR)
+    current = _aware_now(now)
+    report_run_id = run_id or uuid.uuid4().hex
+    if not isinstance(report_run_id, str) or not report_run_id.strip():
+        raise HealthCheckError("run_id must be a nonempty string")
 
+    # DB open is an evidence failure and cannot be represented as a healthy
+    # completed report.  Keep this exception for the CLI, while preserving the
+    # string-returning API for successful runs and service alerts.
     try:
         conn = get_db_connection(readonly=True)
-    except FileNotFoundError as e:
-        print(f"FATAL: {e}", file=sys.stderr)
-        sys.exit(1)
-    except sqlite3.Error as e:
-        print(f"FATAL: Cannot open database: {e}", file=sys.stderr)
-        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - fail closed at the boundary
+        raise HealthCheckError("database_open_failed") from exc
 
     cur = conn.cursor()
-    today = date.today().isoformat()
-    run_at = datetime.now().isoformat(timespec="seconds")
-
     checks: dict[str, dict] = {}
+    checker_errors: list[str] = []
 
-    # 1. Entity total
+    def check_dma_at_report_time() -> dict:
+        return check_dma_health(now=current)
+
+    check_specs = [
+        ("entity_total", check_entity_total, (cur,)),
+        ("dma_health", check_dma_at_report_time, ()),
+        ("new_entity_inflow", check_new_entity_inflow, (cur,)),
+        ("embedding_coverage", check_embedding_coverage, (cur,)),
+        ("orphan_ratio", check_orphan_ratio, (cur,)),
+        ("cross_day_aggregation", check_cross_day_aggregation, (cur,)),
+        ("type_distribution", check_type_distribution, (cur,)),
+        ("name_conflicts", check_name_conflicts, (cur,)),
+        ("relation_integrity", check_relation_integrity, (cur,)),
+        ("pending_merges", check_pending_merges, (cur,)),
+        ("coverage_days", check_coverage_days, (cur,)),
+    ]
     try:
-        checks["entity_total"] = check_entity_total(cur)
-    except sqlite3.Error as e:
-        checks["entity_total"] = {"error": str(e)}
+        for name, function, args in check_specs:
+            _run_one_check(checks, checker_errors, name, function, *args)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - close failure is a checker failure
+            checker_errors.append("database_close")
 
     total = checks.get("entity_total", {}).get("total_entities", 0)
+    if not isinstance(total, int):
+        total = 0
 
-    # 2. DMA health
+    # Runtime evidence errors are checker errors only when they are not the
+    # documented rollout absence.  A fresh running snapshot is incomplete but
+    # still a valid observation and exits 0.
+    dma_check = checks.get("dma_health", {})
+    runtime_error = dma_check.get("runtime_status_error")
+    if runtime_error and runtime_error not in {
+        dma_status.DmaStatusMissingError.code,
+        # A syntactically valid but old snapshot is a DMA scheduling/service
+        # alert.  It is incomplete evidence, but it is not a checker crash;
+        # keep the named DMA finding in the report and exit 0.
+        dma_status.DmaStatusStaleError.code,
+    }:
+        checker_errors.append("dma_status_evidence")
+    if dma_check.get("status_errors") or dma_check.get("runtime_status_errors"):
+        checker_errors.append("dma_status_observation")
+    # Preserve order while avoiding duplicate failure labels.
+    checker_errors = list(dict.fromkeys(checker_errors))
+
     try:
-        checks["dma_health"] = check_dma_health()
-    except Exception as e:
-        checks["dma_health"] = {"error": str(e)}
+        prev = load_previous_report()
+        trend = compare_with_previous(total, prev)
+    except Exception:  # noqa: BLE001 - trend is optional but must not hide failure
+        checker_errors.append("trend")
+        trend = {"trend": "N/A", "previous_total": None, "delta": 0, "delta_pct": 0.0}
 
-    # 3. New entity inflow
-    try:
-        checks["new_entity_inflow"] = check_new_entity_inflow(cur)
-    except sqlite3.Error as e:
-        checks["new_entity_inflow"] = {"error": str(e)}
-
-    # 4. Embedding coverage
-    try:
-        checks["embedding_coverage"] = check_embedding_coverage(cur)
-    except sqlite3.Error as e:
-        checks["embedding_coverage"] = {"error": str(e)}
-
-    # 5. Orphan ratio
-    try:
-        checks["orphan_ratio"] = check_orphan_ratio(cur)
-    except sqlite3.Error as e:
-        checks["orphan_ratio"] = {"error": str(e)}
-
-    # 6. Cross-day aggregation
-    try:
-        checks["cross_day_aggregation"] = check_cross_day_aggregation(cur)
-    except sqlite3.Error as e:
-        checks["cross_day_aggregation"] = {"error": str(e)}
-
-    # 7. Type distribution
-    try:
-        checks["type_distribution"] = check_type_distribution(cur)
-    except sqlite3.Error as e:
-        checks["type_distribution"] = {"error": str(e)}
-
-    # 8. Name conflicts
-    try:
-        checks["name_conflicts"] = check_name_conflicts(cur)
-    except sqlite3.Error as e:
-        checks["name_conflicts"] = {"error": str(e)}
-
-    # 9. Relation integrity
-    try:
-        checks["relation_integrity"] = check_relation_integrity(cur)
-    except sqlite3.Error as e:
-        checks["relation_integrity"] = {"error": str(e)}
-
-    # 10. Pending merges
-    try:
-        checks["pending_merges"] = check_pending_merges(cur)
-    except sqlite3.Error as e:
-        checks["pending_merges"] = {"error": str(e)}
-
-    # 11. Coverage days
-    try:
-        checks["coverage_days"] = check_coverage_days(cur)
-    except sqlite3.Error as e:
-        checks["coverage_days"] = {"error": str(e)}
-
-    conn.close()
-
-    # ── Trend vs previous report ──
-    prev = load_previous_report()
-    trend = compare_with_previous(total, prev)
-
-    # ── Overall status ──
-    # Priority: alert > warning > ok
+    # Priority: alert > warning > info/ok.  Cross-day is deliberately info and
+    # therefore cannot alter this aggregate.
     overall = "ok"
-    severity = {"ok": 0, "warning": 1, "alert": 2}
-    alert_checks = [
-        "dma_health", "new_entity_inflow", "embedding_coverage", "orphan_ratio",
-        "cross_day_aggregation", "name_conflicts", "relation_integrity",
-    ]
-    for check_key in alert_checks:
-        s = checks.get(check_key, {}).get("status", "ok")
-        if severity.get(s, 0) > severity.get(overall, 0):
-            overall = s
+    severity = {"ok": 0, "info": 0, "unknown": 1, "warning": 1, "alert": 2}
+    for check in checks.values():
+        check_status = check.get("status")
+        if severity.get(check_status, 2 if "error" in check else 0) > severity[overall]:
+            overall = check_status if check_status in severity else "alert"
+    if checker_errors:
+        overall = "alert"
 
+    dma_evidence_complete = bool(dma_check.get("evidence_complete", False))
+    checks_complete = not checker_errors and dma_evidence_complete
     report = {
-        "report_date": today,
-        "generated_at": run_at,
+        "schema_version": "kw-health-report-v1",
+        "run_id": report_run_id,
+        "report_date": current.date().isoformat(),
+        "generated_at": current.isoformat(timespec="seconds"),
         "overall_status": overall,
+        "checks_complete": checks_complete,
         "checks": checks,
         "trend": trend,
+        "checker_errors": checker_errors,
         "thresholds_evaluated": {
-            "dma_health_log_stale > 24h": checks.get("dma_health", {}).get("log_freshness_hours", 0) is not None
-                and (checks.get("dma_health", {}).get("log_freshness_hours", 0) or 0) > 24,
-            "dma_health_errors > 10": checks.get("dma_health", {}).get("error_count_24h", 0) > 10,
-            "dma_health_memory_missing": not checks.get("dma_health", {}).get("memory_file_exists", True),
-            "dma_health_checkpoint_stale > 48h": checks.get("dma_health", {}).get("checkpoint_freshness_hours", 0) is not None
-                and (checks.get("dma_health", {}).get("checkpoint_freshness_hours", 0) or 0) > 48,
+            "dma_runtime_status_age > 90m": "dma_status_stale" in dma_check.get("alert_codes", [])
+                or dma_check.get("runtime_status_error") == dma_status.DmaStatusStaleError.code,
+            "dma_pending_or_reconcile_overdue > 24h": any(
+                code in dma_check.get("alert_codes", [])
+                for code in ("dma_pending_overdue", "dma_reconcile_overdue")
+            ),
+            "dma_health_log_stale > 24h": False,
+            "dma_health_errors > 10": False,
+            "dma_health_memory_missing": False,
+            "dma_health_checkpoint_stale > 48h": False,
             "new_entity_inflow == 0": checks.get("new_entity_inflow", {}).get("status") == "alert",
             "embedding_coverage < 70%": checks.get("embedding_coverage", {}).get("status") == "alert",
             "orphan_ratio > 40%": checks.get("orphan_ratio", {}).get("status") == "alert",
-            "cross_day_day2 > 50%": checks.get("cross_day_aggregation", {}).get("status") == "alert",
+            "cross_day_day2 > 50%": False,
             "name_conflicts > 5": checks.get("name_conflicts", {}).get("status") == "warning",
             "broken_relations > 0": checks.get("relation_integrity", {}).get("status") in ("warning", "alert"),
             "entity_delta > ±10%": trend.get("trend", "N/A") in ("growing", "shrinking"),
@@ -618,30 +835,68 @@ def run_health_check(dry_run: bool = False) -> str:
 
     json_text = json.dumps(report, ensure_ascii=False, indent=2)
 
-    if dry_run:
-        print(json_text)
-    else:
-        report_path = os.path.join(REPORTS_DIR, f"{today}.json")
-        with open(report_path, "w") as f:
-            f.write(json_text)
-            f.write("\n")
-        print(f"Report written to {report_path}")
+    if not dry_run:
+        report_path = output_path or os.path.join(
+            REPORTS_DIR, f"{current.date().isoformat()}.json"
+        )
+        _atomic_write_text(report_path, json_text)
+        if output_path is None:
+            print(f"Report written to {report_path}")
 
     return json_text
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Knowledge Weaver Health Check")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print JSON to stdout only; do not write report file.",
+        help="Print JSON to stdout only; do not write a report file (legacy alias for --json).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the structured JSON report to stdout.",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Caller-supplied invocation identifier echoed in the report.",
+    )
+    parser.add_argument(
+        "--output",
+        dest="output_path",
+        help="Write this invocation's report atomically to the exact path.",
     )
     args = parser.parse_args()
-    run_health_check(dry_run=args.dry_run)
+    dry_run = args.dry_run or (args.json and not args.output_path)
+    try:
+        json_text = run_health_check(
+            dry_run=dry_run,
+            run_id=args.run_id,
+            output_path=args.output_path,
+        )
+    except HealthCheckError as exc:
+        print(f"Health check failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json or args.dry_run:
+        print(json_text)
+    try:
+        report = json.loads(json_text)
+    except json.JSONDecodeError:
+        print("Health check failed: invalid generated JSON", file=sys.stderr)
+        return 1
+    # A complete report can legitimately have overall alert/warning because a
+    # service is unhealthy.  Incomplete checker/evidence reports are failures;
+    # rollout-missing status and fresh-running status remain valid incomplete
+    # observations and intentionally exit 0.
+    if report.get("checker_errors"):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
