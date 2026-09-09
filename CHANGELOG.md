@@ -2,6 +2,22 @@
 
 All notable changes to knowledge-weaver. Versioning follows [VERSIONING.md](VERSIONING.md).
 
+## v1.1.7 — runtime health checks and report recovery (2026-09-09)
+
+### Fixed
+- Use DMA's versioned runtime status to distinguish healthy idle, unresolved failures,
+  stale runs and pending work. Historical errors and an absent daily Memory file no
+  longer independently trigger an alert.
+- Treat legacy `day_count` distributions as information; the field does not provide
+  distinct-day aggregation semantics.
+- Validate invocation-owned daily and weekly reports, publish checker failures,
+  clear alerts only after complete recovery, and append weekly history after publication.
+
+### Compatibility
+- Pair with DMA v1.7.1 for the `dma-runtime-status-v1` producer. Memory SPEC v1.1 and
+  the knowledge database schema are unchanged; no historical data migration is required.
+- Linux validation: 98 targeted tests passed, including producer-to-wrapper integration.
+
 ## v1.1.5 — clean_and_rescore FK fix (2026-06-04)
 
 ### Fixed
