@@ -1,6 +1,6 @@
 [project]
 name = "knowledge-weaver"
-version = "1.1.6"
+version = "1.1.7"
 description = "MCP Server for structured knowledge retrieval on top of DMA daily memory files"
 requires-python = ">=3.11"
 dependencies = [
