@@ -112,6 +112,60 @@ See the spec for full details.
 
 ## Development
 
+### DMA runtime health reports
+
+Health monitoring uses the additive [DMA runtime status v1 contract](docs/DMA_RUNTIME_STATUS_V1.md).
+DMA owns the status file; KW never runs an archive or writes DMA state. Memory SPEC v1.1,
+entity counts and scoring remain unchanged. Legacy `day_count` distributions are informational.
+
+Set `KW_DMA_STATUS_PATH` to DMA's `.runtime_status.json` (default:
+`/home/openclaw/.openclaw/skills/daily-memory-archiver/config/.runtime_status.json`).
+Missing status during rollout is unknown/warning, not confirmed recovery. A fresh running
+record does not clear a previous alert. Existing log errors are historical information;
+healthy idle does not require today's Memory file. Unknown pending counts are never zero.
+
+Runtime thresholds in seconds: `KW_DMA_EXPECTED_INTERVAL_SECONDS` (1800),
+`KW_DMA_STATUS_TIMEOUT_SECONDS` (5400), `KW_DMA_BACKLOG_TIMEOUT_SECONDS` (86400).
+Optional evidence paths: `KW_DMA_LOG_PATH`, `KW_DMA_CHECKPOINT_PATH`,
+`KNOWLEDGE_WEAVER_MEMORY_DIR`.
+
+Deploy **all three** `scripts/kw_health_check.py`, `scripts/dma_status.py` and
+`scripts/kw_weekly_trend.py` together to the configured script directory. Deploy
+`deploy/kw_health_wrapper.py` to the actual scheduler entry point. The wrapper accepts
+`daily` or `weekly`, validates a unique subprocess report, and atomically publishes it.
+Do not deploy only the wrapper against an older checker CLI.
+
+Wrapper path overrides: `KW_HEALTH_SCRIPT_DIR`, `KW_HEALTH_REPORTS_DIR`,
+`KW_WEEKLY_REPORTS_DIR`, `KW_ALERT_FLAG`, `KW_WEEKLY_ALERT_FLAG`.
+Weekly history can be redirected with `KW_HEALTH_HISTORY_PATH`; the database with
+`KNOWLEDGE_WEAVER_DB_PATH`. Defaults retain the existing deployment paths.
+
+The checker/weekly CLI accept `--run-id ID --output PATH` for invocation-owned JSON
+reports; plain weekly invocation still writes Markdown. Daily subprocess exit 0
+means a valid report, not necessarily a healthy service. Checker execution failures
+exit nonzero; the wrapper emits a checker-failure alert instead of reading old output.
+Pending alert consumers must support this failure payload for both daily and weekly.
+Weekly failures preserve the existing `kind`/`file`/`summary` shape by publishing a
+fresh checker-failure Markdown file, falling back to the alert directory if needed.
+If both artifact locations fail, a minimal flag carries `summary` and
+`artifact_error` without `file`; consumers must still display that failure.
+Successful weekly history is appended only after
+the final Markdown exists; invocation envelopes do not append history on their own.
+
+For a 30-minute DMA schedule, place the daily KW check at 08:15 and retain runtime
+freshness checks: changing the cron minute alone is not a concurrency guarantee.
+Deployment/scheduler changes must be applied separately by the deployment owner.
+No database migration, historical replay or deployment action is part of this slice.
+
+Targeted local tests (no live database or network required):
+
+```bash
+python -m pytest scripts/test_health_wrapper.py scripts/test_weekly_status.py scripts/test_kw_scripts.py scripts/test_health_status.py scripts/test_report_integration.py
+```
+
+Set `KW_TEST_DMA_ROOT` to a separate DMA checkout to also exercise the real producer
+CLI through the KW wrapper. Otherwise that optional cross-repository test is skipped.
+
 ```bash
 pytest                                              # run all tests
 python -m knowledge_weaver consolidate              # manual consolidation

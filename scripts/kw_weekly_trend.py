@@ -16,15 +16,17 @@ import math
 import os
 import sqlite3
 import sys
+import tempfile
+import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
 
 # ── Absolute paths ───────────────────────────────────────────────────────────
 
-DB_PATH = "/home/openclaw/.openclaw/knowledge/knowledge.db"
-REPORTS_DIR = "/home/openclaw/.openclaw/knowledge/health_reports"
-WEEKLY_DIR = "/home/openclaw/.openclaw/knowledge/weekly_reports"
-HISTORY_PATH = "/home/openclaw/.openclaw/knowledge/health_history.jsonl"
+DB_PATH = os.environ.get("KNOWLEDGE_WEAVER_DB_PATH", "/home/openclaw/.openclaw/knowledge/knowledge.db")
+REPORTS_DIR = os.environ.get("KW_HEALTH_REPORTS_DIR", "/home/openclaw/.openclaw/knowledge/health_reports")
+WEEKLY_DIR = os.environ.get("KW_WEEKLY_REPORTS_DIR", "/home/openclaw/.openclaw/knowledge/weekly_reports")
+HISTORY_PATH = os.environ.get("KW_HEALTH_HISTORY_PATH", "/home/openclaw/.openclaw/knowledge/health_history.jsonl")
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 KNOWN_TYPES = ("tech", "decision", "risk", "preference", "task", "idea", "fact", "project")
@@ -249,12 +251,31 @@ def weekly_delta(reports: list[dict]) -> dict | None:
 
 # ── Report generation ────────────────────────────────────────────────────────
 
-def generate_weekly_report(dry_run: bool = False) -> str:
+def atomic_write(path: str, text: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    ensure_dir(parent)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="\n",
+                                         dir=parent, prefix=".kw-weekly-", delete=False) as f:
+            temporary = f.name
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def generate_weekly_report(dry_run: bool = False, *, run_id: str | None = None,
+                           output_path: str | None = None) -> str:
     """Generate Markdown weekly report.  Returns the Markdown string."""
-    ensure_dir(WEEKLY_DIR)
+    generated = datetime.now().astimezone()
+    run_id = run_id or uuid.uuid4().hex
 
     # Determine ISO week
-    today = date.today()
+    today = generated.date()
     iso_year, iso_week, _ = today.isocalendar()
     week_label = f"{iso_year}-W{iso_week:02d}"
 
@@ -290,7 +311,7 @@ def generate_weekly_report(dry_run: bool = False) -> str:
     md_lines: list[str] = []
     md_lines.append(f"# Knowledge Weaver 周报 {week_label}")
     md_lines.append("")
-    md_lines.append(f"**生成时间**: {datetime.now().isoformat(timespec='seconds')}")
+    md_lines.append(f"**生成时间**: {generated.replace(tzinfo=None).isoformat(timespec='seconds')}")
     md_lines.append(f"**报告周期**: {today.isoformat()}")
     md_lines.append("")
 
@@ -344,6 +365,8 @@ def generate_weekly_report(dry_run: bool = False) -> str:
     md_lines.append("")
     md_lines.append("### day_count 分布")
     md_lines.append("")
+    md_lines.append("统计信息：现有 day_count 不具备跨日统计语义；此分布不用于判定聚合故障。")
+    md_lines.append("")
     md_lines.append("| day_count | 实体数 |")
     md_lines.append("|-----------|--------|")
     for dc, cnt in sorted(metrics["day_count_distribution"].items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
@@ -388,12 +411,6 @@ def generate_weekly_report(dry_run: bool = False) -> str:
     if wow and abs(wow["delta_pct"]) > 10:
         direction = "增长" if wow["delta_pct"] > 0 else "减少"
         alerts.append(f"- 📊 实体数量周环比{direction} {wow['delta_pct']:+.1f}%，需关注数据质量")
-    day2_ratio = 0.0
-    if metrics["entity_total"]:
-        day2 = metrics["day_count_distribution"].get("2", 0)
-        day2_ratio = round(day2 / metrics["entity_total"] * 100, 1)
-    if day2_ratio > 50:
-        alerts.append(f"- ⚠️ day_count=2 实体占比 {day2_ratio:.1f}%，聚合引擎可能失效")
     if drift.get("entropy_delta") is not None and abs(drift["entropy_delta"]) > 0.3:
         alerts.append(f"- 📊 类型分布漂移显著 (Δ={drift['entropy_delta']:+.4f})，建议检查知识摄入策略变化")
 
@@ -420,15 +437,13 @@ def generate_weekly_report(dry_run: bool = False) -> str:
 
     # ── Persist ──
     if not dry_run:
-        report_path = os.path.join(WEEKLY_DIR, f"{week_label}.md")
-        with open(report_path, "w") as f:
-            f.write(md_text)
+        report_path = output_path or os.path.join(WEEKLY_DIR, f"{week_label}.md")
 
         # Append to history file (JSONL)
-        ensure_dir(os.path.dirname(HISTORY_PATH))
         history_entry = {
             "week": week_label,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "generated_at": generated.replace(tzinfo=None).isoformat(timespec="seconds"),
+            "run_id": run_id,
             "metrics": metrics,
             "derived": {
                 "relation_density": rel_density,
@@ -438,11 +453,25 @@ def generate_weekly_report(dry_run: bool = False) -> str:
             "drift": drift,
             "wow_delta": wow,
         }
-        with open(HISTORY_PATH, "a") as hf:
-            hf.write(json.dumps(history_entry, ensure_ascii=False) + "\n")
+        if output_path:
+            envelope = {"schema_version": "kw-weekly-report-v1", "run_id": run_id,
+                        "generated_at": generated.isoformat(timespec="seconds"),
+                        "report_date": today.isoformat(), "week": week_label,
+                        "checks_complete": True, "markdown": md_text,
+                        "history_entry": history_entry}
+            atomic_write(report_path, json.dumps(envelope, ensure_ascii=False) + "\n")
+        else:
+            atomic_write(report_path, md_text)
+            # Never record success before the corresponding report exists.
+            ensure_dir(os.path.dirname(os.path.abspath(HISTORY_PATH)))
+            with open(HISTORY_PATH, "a", encoding="utf-8") as hf:
+                hf.write(json.dumps(dict(history_entry, report_path=report_path), ensure_ascii=False) + "\n")
+                hf.flush()
+                os.fsync(hf.fileno())
 
         print(f"Weekly report written to {report_path}")
-        print(f"History appended to {HISTORY_PATH}")
+        if not output_path:
+            print(f"History appended to {HISTORY_PATH}")
 
     if dry_run:
         print(md_text)
@@ -454,13 +483,15 @@ def generate_weekly_report(dry_run: bool = False) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Knowledge Weaver Weekly Trend Report")
+    parser.add_argument("--run-id", help="Caller invocation ID")
+    parser.add_argument("--output", help="Write a versioned JSON envelope to this invocation-owned path")
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print Markdown to stdout only; do not write files.",
     )
     args = parser.parse_args()
-    generate_weekly_report(dry_run=args.dry_run)
+    generate_weekly_report(dry_run=args.dry_run, run_id=args.run_id, output_path=args.output)
 
 
 if __name__ == "__main__":
